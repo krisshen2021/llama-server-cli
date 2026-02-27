@@ -109,12 +109,54 @@ node -v
 npm -v
 ```
 
-### 3) Build and install llama.cpp
+### 3) Check environment and pick a backend
+
+Goal: decide CPU vs GPU build for `llama.cpp`.
+
+#### Quick checks
+
+- NVIDIA GPU present: `nvidia-smi`
+- AMD GPU on Linux (ROCm): `rocminfo`
+- Apple Silicon (Metal): `uname -m` returns `arm64`
+
+If none of the above apply, use the CPU build.
+
+#### Backend choice
+
+- CPU: most compatible, slowest
+- CUDA: NVIDIA GPUs
+- ROCm: AMD GPUs on Linux
+- Metal: Apple Silicon
+
+### 4) Build and install llama.cpp
 
 ```bash
 git clone https://github.com/ggerganov/llama.cpp.git
 cd llama.cpp
+
+# CPU build
 cmake -B build
+cmake --build build -j
+```
+
+CUDA (NVIDIA) build:
+
+```bash
+cmake -B build -DGGML_CUDA=ON
+cmake --build build -j
+```
+
+ROCm (AMD, Linux) build:
+
+```bash
+cmake -B build -DGGML_ROCM=ON
+cmake --build build -j
+```
+
+Metal (Apple Silicon) build:
+
+```bash
+cmake -B build -DGGML_METAL=ON
 cmake --build build -j
 ```
 
@@ -139,7 +181,7 @@ On Windows, it will be:
 <llama.cpp>\build\bin\Release\llama-server.exe
 ```
 
-### 4) Clone and build this project
+### 5) Clone and build this project
 
 ```bash
 git clone <your-repo-url>
@@ -149,7 +191,7 @@ npm run build
 npm link
 ```
 
-### 5) Configure lsc
+### 6) Configure lsc
 
 Create or update `~/.config/lsc/config.json` with at least these keys:
 
@@ -171,7 +213,7 @@ Notes:
 - `modelsDir` can be any directory you store GGUF models in.
 - `llamaServerPath` must be the absolute path to `llama-server`.
 
-### 6) Run
+### 7) Run
 
 ```bash
 lsc
@@ -183,7 +225,7 @@ If you want to start a server directly:
 lsc start --model /absolute/path/to/model.gguf
 ```
 
-### 7) Download models (optional)
+### 8) Download models (optional)
 
 You can download GGUF models with the TUI:
 
@@ -199,7 +241,7 @@ If you prefer manual downloads, place `.gguf` files into your `modelsDir` and ve
 lsc models
 ```
 
-### 8) First-run checks
+### 9) First-run checks
 
 Confirm configuration:
 

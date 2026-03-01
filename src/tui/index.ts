@@ -1,6 +1,6 @@
 import blessed from 'blessed';
 import http from 'http';
-import { rmSync, readdirSync } from 'fs';
+import { rmSync, readdirSync, writeFileSync } from 'fs';
 import { basename, dirname, isAbsolute, join } from 'path';
 import { execSync } from 'child_process';
 import { ModelInfo, ServerOptions } from '../types.js';
@@ -112,6 +112,7 @@ export function createTUI(): void {
   let currentServerOptions: Partial<ServerOptions> = {}; // 当前服务器参数
   let presetEditMode: boolean = false; // 是否处于编辑预设模式
   let modelDeleteHandler: (() => void) | null = null;
+  let logPaused = false;
 
   // 下载管理器状态
   interface DownloadEntry {
@@ -359,7 +360,7 @@ export function createTUI(): void {
     left: 0,
     width: '100%',
     height: 3,
-    content: `{center}{${theme.secondary}-fg}↑↓{/} Navigate {${theme.muted}-fg}│{/} {${theme.secondary}-fg}Enter{/} Select {${theme.muted}-fg}│{/} {${theme.secondary}-fg}Tab{/} Switch {${theme.muted}-fg}│{/} {${theme.secondary}-fg}r{/} Refresh {${theme.muted}-fg}│{/} {${theme.secondary}-fg}q{/} Quit{/center}`,
+    content: `{center}{${theme.secondary}-fg}↑↓{/} Navigate {${theme.muted}-fg}│{/} {${theme.secondary}-fg}Enter{/} Select {${theme.muted}-fg}│{/} {${theme.secondary}-fg}Tab{/} Switch {${theme.muted}-fg}│{/} {${theme.secondary}-fg}r{/} Refresh {${theme.muted}-fg}│{/} {${theme.secondary}-fg}l{/} Pause Logs {${theme.muted}-fg}│{/} {${theme.secondary}-fg}q{/} Quit{/center}`,
     tags: true,
     style: {
       fg: theme.text,
@@ -476,8 +477,26 @@ export function createTUI(): void {
       if (currentServerOptions.tensorSplit) {
         content += `  {${theme.secondary}-fg}Tensor Split:{/} ${currentServerOptions.tensorSplit}\n`;
       }
+      if (currentServerOptions.batchSize !== undefined) {
+        content += `  {${theme.secondary}-fg}Batch Size:{/} ${currentServerOptions.batchSize}\n`;
+      }
+      if (currentServerOptions.threadsBatch !== undefined) {
+        content += `  {${theme.secondary}-fg}Threads Batch:{/} ${currentServerOptions.threadsBatch}\n`;
+      }
+      if (currentServerOptions.cachePrompt !== undefined) {
+        content += `  {${theme.secondary}-fg}Cache Prompt:{/} ${currentServerOptions.cachePrompt ? 'on' : 'off'}\n`;
+      }
+      if (currentServerOptions.cacheReuse !== undefined) {
+        content += `  {${theme.secondary}-fg}Cache Reuse:{/} ${currentServerOptions.cacheReuse}\n`;
+      }
+      if (currentServerOptions.fit !== undefined) {
+        content += `  {${theme.secondary}-fg}Fit:{/} ${currentServerOptions.fit ? 'on' : 'off'}\n`;
+      }
       if (currentServerOptions.reasoningBudget !== undefined) {
-        const thinking = currentServerOptions.reasoningBudget === 0 ? '{yellow-fg}Off{/}' : '{green-fg}On{/}';
+        let thinking = '{green-fg}On{/}';
+        if (currentServerOptions.reasoningBudget === 0) {
+          thinking = '{yellow-fg}Off{/}';
+        }
         content += `  {${theme.secondary}-fg}Thinking:{/} ${thinking}\n`;
       }
       if (currentServerOptions.mmproj) {
@@ -500,6 +519,7 @@ export function createTUI(): void {
   }
 
   function updateLogs(): void {
+    if (logPaused) return;
     const logs = readLastLogs(100);
     if (logs) {
       serverLogBox.setContent(logs);
@@ -541,7 +561,10 @@ export function createTUI(): void {
     const config = getExpandedConfig();
     const items = presetNames.map(name => {
       const p = presets[name];
-      const thinking = p.reasoningBudget === 0 ? '{yellow-fg}[no-think]{/yellow-fg}' : '{green-fg}[think]{/green-fg}';
+      let thinking = '{green-fg}[think]{/green-fg}';
+      if (p.reasoningBudget === 0) {
+        thinking = '{yellow-fg}[no-think]{/yellow-fg}';
+      }
       return ` ${name} ${thinking}`;
     });
     
@@ -578,7 +601,22 @@ export function createTUI(): void {
     const systemInfo = getSystemInfo();
     const gpuCount = systemInfo.gpus?.length || 0;
     if (gpuCount <= 1) return [''];
-    if (gpuCount === 2) return ['', '50,50', '60,40', '70,30', '80,20', '90,10'];
+    if (gpuCount === 2) {
+      return [
+        '',
+        '50,50',
+        '40,60',
+        '30,70',
+        '20,80',
+        '10,90',
+        '0,100',
+        '60,40',
+        '70,30',
+        '80,20',
+        '90,10',
+        '100,0',
+      ];
+    }
     const base = Math.floor(100 / gpuCount);
     const splits = new Array(gpuCount).fill(base);
     const remainder = 100 - base * gpuCount;
@@ -609,9 +647,15 @@ export function createTUI(): void {
     const options: ServerOptions = {
       model: currentModel.path,
       mmproj: currentModel.mmproj,
+      useVision: true,
       ctxSize: config.defaultCtxSize,
       gpuLayers: config.defaultGpuLayers,
       tensorSplit: undefined,
+      fit: true,
+      batchSize: config.defaultBatchSize,
+      threadsBatch: config.defaultThreadsBatch,
+      cachePrompt: config.defaultCachePrompt,
+      cacheReuse: config.defaultCacheReuse,
       kvCacheType: 'f16',
       chatTemplate: undefined,
       host: '127.0.0.1', // 内部只监听 localhost
@@ -715,6 +759,7 @@ export function createTUI(): void {
   }
 
   async function handleLoadPreset(index: number): Promise<void> {
+    const config = getExpandedConfig();
     if (index < 0 || index >= presetNames.length) {
       return;
     }
@@ -749,9 +794,15 @@ export function createTUI(): void {
     const options: ServerOptions = {
       model: model.path,
       mmproj: model.mmproj,
+      useVision: preset.useVision ?? true,
       ctxSize: preset.ctxSize,
       gpuLayers: preset.gpuLayers,
       tensorSplit: preset.tensorSplit,
+      fit: preset.fit ?? true,
+      batchSize: preset.batchSize ?? config.defaultBatchSize,
+      threadsBatch: preset.threadsBatch ?? config.defaultThreadsBatch,
+      cachePrompt: preset.cachePrompt ?? config.defaultCachePrompt,
+      cacheReuse: preset.cacheReuse ?? config.defaultCacheReuse,
       kvCacheType: preset.kvCacheType || 'f16',
       chatTemplate: preset.chatTemplate,
       host: '127.0.0.1', // 内部只监听 localhost
@@ -984,9 +1035,15 @@ export function createTUI(): void {
     let editState = {
       model: preset.model,
       mmproj: (preset as any).mmproj,
+      useVision: preset.useVision ?? true,
+      fit: preset.fit ?? true,
       ctxSize: preset.ctxSize,
       gpuLayers: preset.gpuLayers,
       tensorSplit: preset.tensorSplit || '',
+      batchSize: preset.batchSize ?? 0,
+      threadsBatch: preset.threadsBatch ?? 0,
+      cachePrompt: preset.cachePrompt ?? true,
+      cacheReuse: preset.cacheReuse ?? 0,
       kvCacheType: preset.kvCacheType || 'f16',
       chatTemplate: preset.chatTemplate || '',
       host: (preset as any).host || '0.0.0.0',
@@ -1025,8 +1082,8 @@ export function createTUI(): void {
 
     // 当前选中的字段
     let selectedField = 0;
-    const fields = ['ctxSize', 'gpuLayers', 'tensorSplit', 'kvCacheType', 'chatTemplate', 'port', 'host', 'reasoningBudget', 'jinja', 'flashAttn'];
-    const fieldLabels = ['Context Size', 'GPU Layers', 'Tensor Split', 'KV Cache', 'Chat Template', 'Port', 'Host', 'Thinking', 'Jinja', 'Flash Attention'];
+    const fields = ['ctxSize', 'gpuLayers', 'tensorSplit', 'useVision', 'fit', 'batchSize', 'threadsBatch', 'cachePrompt', 'cacheReuse', 'kvCacheType', 'chatTemplate', 'port', 'host', 'reasoningBudget', 'jinja', 'flashAttn'];
+    const fieldLabels = ['Context Size', 'GPU Layers', 'Tensor Split', 'Vision', 'Fit', 'Batch Size', 'Threads Batch', 'Cache Prompt', 'Cache Reuse', 'KV Cache', 'Chat Template', 'Port', 'Host', 'Thinking', 'Jinja', 'Flash Attention'];
 
     function renderEditor() {
       let content = `{${theme.muted}-fg}Model:{/} ${editState.model}\n\n`;
@@ -1046,6 +1103,24 @@ export function createTUI(): void {
             break;
           case 'tensorSplit':
             value = editState.tensorSplit ? editState.tensorSplit : '{yellow-fg}Auto{/}';
+            break;
+          case 'useVision':
+            value = editState.useVision ? '{green-fg}On{/}' : '{yellow-fg}Off{/}';
+            break;
+          case 'fit':
+            value = editState.fit ? '{green-fg}On{/}' : '{yellow-fg}Off{/}';
+            break;
+          case 'batchSize':
+            value = editState.batchSize ? String(editState.batchSize) : '{yellow-fg}Default{/}';
+            break;
+          case 'threadsBatch':
+            value = editState.threadsBatch ? String(editState.threadsBatch) : '{yellow-fg}Auto{/}';
+            break;
+          case 'cachePrompt':
+            value = editState.cachePrompt ? '{green-fg}On{/}' : '{yellow-fg}Off{/}';
+            break;
+          case 'cacheReuse':
+            value = editState.cacheReuse ? String(editState.cacheReuse) : '{yellow-fg}Default{/}';
             break;
           case 'kvCacheType':
             value = editState.kvCacheType;
@@ -1106,6 +1181,36 @@ export function createTUI(): void {
             const splitIdx = splitOptions.indexOf(editState.tensorSplit || '');
             editState.tensorSplit = splitOptions[(splitIdx + 1) % splitOptions.length];
             break;
+          case 'useVision':
+            editState.useVision = !editState.useVision;
+            break;
+          case 'fit':
+            editState.fit = !editState.fit;
+            break;
+          case 'batchSize':
+            if (delta < 0) {
+              editState.batchSize = Math.max(0, editState.batchSize - 256);
+            } else {
+              editState.batchSize = editState.batchSize === 0 ? 2048 : Math.min(8192, editState.batchSize + 256);
+            }
+            break;
+          case 'threadsBatch':
+            if (delta < 0) {
+              editState.threadsBatch = Math.max(0, editState.threadsBatch - 2);
+            } else {
+              editState.threadsBatch = editState.threadsBatch === 0 ? 4 : Math.min(64, editState.threadsBatch + 2);
+            }
+            break;
+          case 'cachePrompt':
+            editState.cachePrompt = !editState.cachePrompt;
+            break;
+          case 'cacheReuse':
+            if (delta < 0) {
+              editState.cacheReuse = Math.max(0, editState.cacheReuse - 256);
+            } else {
+              editState.cacheReuse = editState.cacheReuse === 0 ? 256 : Math.min(4096, editState.cacheReuse + 256);
+            }
+            break;
           case 'kvCacheType':
             const kvTypes: Array<'f16' | 'q8_0' | 'q4_0'> = ['f16', 'q8_0', 'q4_0'];
             const kvIdx = kvTypes.indexOf(editState.kvCacheType);
@@ -1157,9 +1262,15 @@ export function createTUI(): void {
           name: presetName,
           model: editState.model,
           mmproj: editState.mmproj,
+          useVision: editState.useVision,
+          fit: editState.fit,
           ctxSize: editState.ctxSize,
           gpuLayers: editState.gpuLayers,
           tensorSplit: editState.tensorSplit || undefined,
+          batchSize: editState.batchSize || undefined,
+          threadsBatch: editState.threadsBatch || undefined,
+          cachePrompt: editState.cachePrompt,
+          cacheReuse: editState.cacheReuse || undefined,
           kvCacheType: editState.kvCacheType,
           chatTemplate: editState.chatTemplate || undefined,
           host: editState.host,
@@ -2295,6 +2406,7 @@ export function createTUI(): void {
         showBody: true,
         showResponse: false,
         onLog: (message, type) => {
+          if (logPaused) return;
           // 分行输出，每行单独 log 到请求日志窗口
           const lines = message.split('\n');
           for (const line of lines) {
@@ -2412,11 +2524,39 @@ export function createTUI(): void {
     showMessage('Refreshed.', 'info');
   });
 
+  screen.key(['l'], () => {
+    logPaused = !logPaused;
+    if (logPaused) {
+      stopLogWatcher();
+      showMessage('Logs paused. Use l to resume.', 'info');
+    } else {
+      startLogWatcher();
+      showMessage('Logs resumed.', 'success');
+    }
+  });
+
   screen.key(['s'], () => {
     if (downloadManagerVisible) {
       if (downloadManagerList) downloadManagerList.focus();
-    } else if (activeDownloadManager) {
+      return;
+    }
+    if (activeDownloadManager) {
       openDownloadManager(true);
+      return;
+    }
+
+    try {
+      const logFile = getLogFile();
+      const dest = join(CONFIG_DIR, 'sys.log');
+      const content = readLastLogs(100000);
+      if (!content) {
+        showMessage('No logs to save.', 'error');
+        return;
+      }
+      writeFileSync(dest, content, 'utf-8');
+      showMessage(`Saved logs to ${dest}`, 'success');
+    } catch (err) {
+      showMessage(`Failed to save logs: ${(err as Error).message}`, 'error');
     }
   });
 

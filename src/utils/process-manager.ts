@@ -74,7 +74,7 @@ function buildServerArgs(options: ServerOptions): string[] {
   args.push('-m', options.model);
   
   // mmproj（视觉投影）
-  if (options.mmproj) {
+  if (options.mmproj && options.useVision !== false) {
     args.push('--mmproj', options.mmproj);
   }
   
@@ -91,6 +91,13 @@ function buildServerArgs(options: ServerOptions): string[] {
   // 多卡张量分配
   if (options.tensorSplit) {
     args.push('-ts', options.tensorSplit);
+  }
+
+  // 适配显存 (fit)
+  if (options.fit === false) {
+    args.push('-fit', 'off');
+  } else if (options.fit === true) {
+    args.push('-fit', 'on');
   }
 
   // KV Cache 量化
@@ -133,10 +140,26 @@ function buildServerArgs(options: ServerOptions): string[] {
   if (options.threads) {
     args.push('-t', options.threads.toString());
   }
+
+  // 批处理线程数
+  if (options.threadsBatch !== undefined && options.threadsBatch !== 0) {
+    args.push('-tb', options.threadsBatch.toString());
+  }
   
   // 批处理大小
   if (options.batchSize) {
     args.push('-b', options.batchSize.toString());
+  }
+
+  // Prompt cache
+  if (options.cachePrompt === false) {
+    args.push('--no-cache-prompt');
+  } else if (options.cachePrompt === true) {
+    args.push('--cache-prompt');
+  }
+
+  if (options.cacheReuse !== undefined) {
+    args.push('--cache-reuse', options.cacheReuse.toString());
   }
   
   return args;

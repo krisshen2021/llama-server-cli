@@ -23,6 +23,13 @@ export function createStartCommand(): Command {
     .option('--no-jinja', 'Disable Jinja template')
     .option('-fa, --flash-attn <mode>', 'Flash attention mode (on/off/auto)')
     .option('-ts, --tensor-split <split>', 'Tensor split (e.g. 50,50)')
+    .option('-b, --batch-size <size>', 'Batch size', parseInt)
+    .option('-tb, --threads-batch <threads>', 'Batch threads (0=auto)', parseInt)
+    .option('--cache-prompt', 'Enable prompt cache')
+    .option('--no-cache-prompt', 'Disable prompt cache')
+    .option('--cache-reuse <size>', 'Cache reuse chunk size', parseInt)
+    .option('--no-vision', 'Disable vision (ignore mmproj)')
+    .option('--fit <mode>', 'Fit model to free VRAM (on/off)')
     .option('--reasoning-budget <budget>', 'Reasoning budget (-1=unlimited, 0=disabled)', parseInt)
     .option('-i, --interactive', 'Interactive mode')
     .option('-L, --log-requests', 'Enable request logging proxy (runs in foreground)')
@@ -107,6 +114,15 @@ async function runStart(presetName?: string, cmdOptions?: Record<string, unknown
   if (cmdOptions?.jinja === false) serverOptions.jinja = false;
   if (cmdOptions?.flashAttn) serverOptions.flashAttn = cmdOptions.flashAttn as 'on' | 'off' | 'auto';
   if (cmdOptions?.tensorSplit) serverOptions.tensorSplit = cmdOptions.tensorSplit as string;
+  if (cmdOptions?.batchSize) serverOptions.batchSize = cmdOptions.batchSize as number;
+  if (cmdOptions?.threadsBatch !== undefined) serverOptions.threadsBatch = cmdOptions.threadsBatch as number;
+  if (cmdOptions?.cachePrompt !== undefined) serverOptions.cachePrompt = cmdOptions.cachePrompt as boolean;
+  if (cmdOptions?.cacheReuse !== undefined) serverOptions.cacheReuse = cmdOptions.cacheReuse as number;
+  if (cmdOptions?.vision === false) serverOptions.useVision = false;
+  if (cmdOptions?.fit) {
+    const normalized = (cmdOptions.fit as string).toLowerCase();
+    serverOptions.fit = normalized === 'on';
+  }
   if (cmdOptions?.reasoningBudget !== undefined) serverOptions.reasoningBudget = cmdOptions.reasoningBudget as number;
   
   // 交互模式或缺少必要参数时，进入交互式选择
@@ -203,6 +219,11 @@ async function runStart(presetName?: string, cmdOptions?: Record<string, unknown
     flashAttn: serverOptions.flashAttn ?? 'auto',
     reasoningBudget: serverOptions.reasoningBudget ?? -1,
     tensorSplit: serverOptions.tensorSplit,
+    batchSize: serverOptions.batchSize ?? config.defaultBatchSize,
+    threadsBatch: serverOptions.threadsBatch ?? config.defaultThreadsBatch,
+    cachePrompt: serverOptions.cachePrompt ?? config.defaultCachePrompt,
+    cacheReuse: serverOptions.cacheReuse ?? config.defaultCacheReuse,
+    fit: serverOptions.fit,
   };
   
   // 显示配置
@@ -220,6 +241,21 @@ async function runStart(presetName?: string, cmdOptions?: Record<string, unknown
   console.log(chalk.gray(`  Thinking: ${finalOptions.reasoningBudget === 0 ? 'disabled' : 'enabled'}`));
   if (finalOptions.tensorSplit) {
     console.log(chalk.gray(`  Tensor:   ${finalOptions.tensorSplit}`));
+  }
+  if (finalOptions.batchSize !== undefined) {
+    console.log(chalk.gray(`  Batch:    ${finalOptions.batchSize}`));
+  }
+  if (finalOptions.threadsBatch !== undefined) {
+    console.log(chalk.gray(`  T.Batch:  ${finalOptions.threadsBatch}`));
+  }
+  if (finalOptions.cachePrompt !== undefined) {
+    console.log(chalk.gray(`  Cache:    ${finalOptions.cachePrompt ? 'on' : 'off'}`));
+  }
+  if (finalOptions.cacheReuse !== undefined) {
+    console.log(chalk.gray(`  Reuse:    ${finalOptions.cacheReuse}`));
+  }
+  if (finalOptions.fit !== undefined) {
+    console.log(chalk.gray(`  Fit:      ${finalOptions.fit ? 'on' : 'off'}`));
   }
   console.log();
   

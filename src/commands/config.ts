@@ -31,7 +31,7 @@ export function createConfigCommand(): Command {
     .command('get <key>')
     .description('Get a configuration value')
     .action((key: string) => {
-      const validKeys = ['modelsDir', 'llamaServerPath', 'defaultPort', 'defaultCtxSize', 'defaultGpuLayers', 'defaultHost'];
+      const validKeys = ['modelsDir', 'llamaServerPath', 'defaultPort', 'defaultCtxSize', 'defaultGpuLayers', 'defaultHost', 'defaultBatchSize', 'defaultThreadsBatch', 'defaultCachePrompt', 'defaultCacheReuse'];
       
       if (!validKeys.includes(key)) {
         console.error(chalk.red(`Invalid key: ${key}`));
@@ -48,7 +48,7 @@ export function createConfigCommand(): Command {
     .command('set <key> <value>')
     .description('Set a configuration value')
     .action((key: string, value: string) => {
-      const validKeys = ['modelsDir', 'llamaServerPath', 'defaultPort', 'defaultCtxSize', 'defaultGpuLayers', 'defaultHost'];
+      const validKeys = ['modelsDir', 'llamaServerPath', 'defaultPort', 'defaultCtxSize', 'defaultGpuLayers', 'defaultHost', 'defaultBatchSize', 'defaultThreadsBatch', 'defaultCachePrompt', 'defaultCacheReuse'];
       
       if (!validKeys.includes(key)) {
         console.error(chalk.red(`Invalid key: ${key}`));
@@ -56,10 +56,10 @@ export function createConfigCommand(): Command {
         process.exit(1);
       }
       
-      let parsedValue: string | number = value;
+      let parsedValue: string | number | boolean = value;
       
       // 数值类型转换
-      if (key === 'defaultPort' || key === 'defaultCtxSize') {
+      if (key === 'defaultPort' || key === 'defaultCtxSize' || key === 'defaultBatchSize' || key === 'defaultThreadsBatch' || key === 'defaultCacheReuse') {
         parsedValue = parseInt(value);
         if (isNaN(parsedValue)) {
           console.error(chalk.red(`Invalid value for ${key}: must be a number`));
@@ -73,6 +73,13 @@ export function createConfigCommand(): Command {
             process.exit(1);
           }
         }
+      } else if (key === 'defaultCachePrompt') {
+        const normalized = value.toLowerCase();
+        if (normalized !== 'true' && normalized !== 'false') {
+          console.error(chalk.red(`Invalid value for ${key}: must be true or false`));
+          process.exit(1);
+        }
+        parsedValue = normalized === 'true';
       }
       
       setConfigValue(key as keyof Config, parsedValue as never);

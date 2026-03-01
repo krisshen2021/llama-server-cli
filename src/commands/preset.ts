@@ -66,6 +66,24 @@ export function createPresetCommand(): Command {
       if (preset.tensorSplit) {
         console.log(`  ${chalk.yellow('tensorSplit:'.padEnd(18))} ${chalk.white(preset.tensorSplit)}`);
       }
+      if (preset.useVision !== undefined) {
+        console.log(`  ${chalk.yellow('vision:'.padEnd(18))} ${chalk.white(preset.useVision ? 'on' : 'off')}`);
+      }
+      if (preset.fit !== undefined) {
+        console.log(`  ${chalk.yellow('fit:'.padEnd(18))} ${chalk.white(preset.fit ? 'on' : 'off')}`);
+      }
+      if (preset.batchSize !== undefined) {
+        console.log(`  ${chalk.yellow('batchSize:'.padEnd(18))} ${chalk.white(preset.batchSize)}`);
+      }
+      if (preset.threadsBatch !== undefined) {
+        console.log(`  ${chalk.yellow('threadsBatch:'.padEnd(18))} ${chalk.white(preset.threadsBatch)}`);
+      }
+      if (preset.cachePrompt !== undefined) {
+        console.log(`  ${chalk.yellow('cachePrompt:'.padEnd(18))} ${chalk.white(String(preset.cachePrompt))}`);
+      }
+      if (preset.cacheReuse !== undefined) {
+        console.log(`  ${chalk.yellow('cacheReuse:'.padEnd(18))} ${chalk.white(preset.cacheReuse)}`);
+      }
       console.log(`  ${chalk.yellow('host:'.padEnd(18))} ${chalk.white(preset.host)}`);
       console.log(`  ${chalk.yellow('port:'.padEnd(18))} ${chalk.white(preset.port)}`);
       console.log(`  ${chalk.yellow('jinja:'.padEnd(18))} ${chalk.white(preset.jinja)}`);
@@ -167,6 +185,60 @@ async function runPresetSave(name: string): Promise<void> {
       filter: (val) => String(val || '').trim(),
     },
     {
+      type: 'confirm',
+      name: 'useVision',
+      message: 'Enable vision (mmproj)?',
+      default: existing?.useVision ?? true,
+    },
+    {
+      type: 'confirm',
+      name: 'fit',
+      message: 'Fit model to free VRAM?',
+      default: existing?.fit ?? true,
+    },
+    {
+      type: 'input',
+      name: 'batchSize',
+      message: 'Batch size (0=default, empty=default):',
+      default: existing?.batchSize ?? '',
+      filter: (val) => {
+        const trimmed = String(val || '').trim();
+        if (!trimmed) return '';
+        const parsed = parseInt(trimmed);
+        return isNaN(parsed) ? '' : parsed;
+      },
+    },
+    {
+      type: 'input',
+      name: 'threadsBatch',
+      message: 'Threads batch (0=auto, empty=default):',
+      default: existing?.threadsBatch ?? '',
+      filter: (val) => {
+        const trimmed = String(val || '').trim();
+        if (!trimmed) return '';
+        const parsed = parseInt(trimmed);
+        return isNaN(parsed) ? '' : parsed;
+      },
+    },
+    {
+      type: 'confirm',
+      name: 'cachePrompt',
+      message: 'Enable prompt cache?',
+      default: existing?.cachePrompt ?? true,
+    },
+    {
+      type: 'input',
+      name: 'cacheReuse',
+      message: 'Cache reuse size (0=disabled, empty=default):',
+      default: existing?.cacheReuse ?? '',
+      filter: (val) => {
+        const trimmed = String(val || '').trim();
+        if (!trimmed) return '';
+        const parsed = parseInt(trimmed);
+        return isNaN(parsed) ? '' : parsed;
+      },
+    },
+    {
       type: 'input',
       name: 'host',
       message: 'Host:',
@@ -197,14 +269,15 @@ async function runPresetSave(name: string): Promise<void> {
       default: existing?.flashAttn ?? 'auto',
     },
     {
-      type: 'list',
+      type: 'input',
       name: 'reasoningBudget',
-      message: 'Reasoning/Thinking mode:',
-      choices: [
-        { name: 'Enabled (unlimited thinking)', value: -1 },
-        { name: 'Disabled (no thinking, faster)', value: 0 },
-      ],
-      default: existing?.reasoningBudget === 0 ? 1 : 0,
+      message: 'Reasoning/Thinking budget (-1=unlimited, 0=off):',
+      default: existing?.reasoningBudget ?? -1,
+      filter: (val) => {
+        const parsed = parseInt(String(val).trim());
+        if (parsed === 0 || parsed === -1) return parsed;
+        return -1;
+      },
     },
   ]);
   
@@ -214,6 +287,12 @@ async function runPresetSave(name: string): Promise<void> {
     ctxSize: answers.ctxSize,
     gpuLayers: answers.gpuLayers,
     tensorSplit: answers.tensorSplit || undefined,
+    useVision: answers.useVision,
+    fit: answers.fit,
+    batchSize: answers.batchSize === '' ? undefined : answers.batchSize,
+    threadsBatch: answers.threadsBatch === '' ? undefined : answers.threadsBatch,
+    cachePrompt: answers.cachePrompt,
+    cacheReuse: answers.cacheReuse === '' ? undefined : answers.cacheReuse,
     host: answers.host,
     port: answers.port,
     jinja: answers.jinja,

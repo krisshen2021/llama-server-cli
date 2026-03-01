@@ -50,6 +50,25 @@ lsc preset save my-2x3090
 lsc start my-2x3090
 ```
 
+## Disable vision (mmproj)
+
+If you want to test non-vision mode, pass `--no-vision` to ignore the mmproj projector.
+
+```bash
+lsc start --model /path/to/model.gguf --no-vision
+```
+
+## Chat templates
+
+You can select a custom chat template (Jinja) from the preset editor. Global templates live in:
+
+- `~/.config/lsc/templates/`
+
+This build adds two shared templates:
+
+- `chat-template-visible-think.jinja`: exposes a visible "Thought:" prefix
+- `chat-template-no-think.jinja`: suppresses any hidden thinking
+
 ## Configuration
 
 Config file is stored at:

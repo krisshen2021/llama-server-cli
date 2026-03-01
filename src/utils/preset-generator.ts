@@ -19,6 +19,17 @@ export interface GeneratePresetOptions {
   reasoningBudget?: number;
 }
 
+function buildEqualTensorSplit(gpuCount: number): string | undefined {
+  if (gpuCount <= 1) return undefined;
+  const base = Math.floor(100 / gpuCount);
+  const splits = new Array(gpuCount).fill(base);
+  const remainder = 100 - base * gpuCount;
+  if (remainder > 0) {
+    splits[splits.length - 1] += remainder;
+  }
+  return splits.join(',');
+}
+
 /**
  * 生成唯一的预设名称
  */
@@ -89,6 +100,7 @@ export function generatePreset(options: GeneratePresetOptions): Preset {
     model: mainModelPath,
     ctxSize,
     gpuLayers,
+    tensorSplit: buildEqualTensorSplit(systemInfo.gpus?.length || 0),
     kvCacheType: 'f16',
     host: '0.0.0.0',
     port: 8080,

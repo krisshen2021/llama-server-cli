@@ -51,19 +51,23 @@ import {
 } from '../utils/download-meta.js';
 
 // 获取 NVIDIA GPU 信息
-function getGpuInfo(): { used: number; total: number; percent: number; temp: number } | null {
+function getGpuInfo(): Array<{ used: number; total: number; percent: number; temp: number }> | null {
   try {
     const output = execSync(
       'nvidia-smi --query-gpu=memory.used,memory.total,temperature.gpu --format=csv,noheader,nounits',
       { encoding: 'utf-8', timeout: 2000 }
     );
-    const [used, total, temp] = output.trim().split(', ').map(Number);
-    return {
-      used,
-      total,
-      percent: Math.round((used / total) * 100),
-      temp,
-    };
+    const lines = output.trim().split('\n').filter(Boolean);
+    if (lines.length === 0) return null;
+    return lines.map((line) => {
+      const [used, total, temp] = line.split(', ').map(Number);
+      return {
+        used,
+        total,
+        percent: Math.round((used / total) * 100),
+        temp,
+      };
+    });
   } catch {
     return null;
   }
@@ -437,7 +441,7 @@ export function createTUI(): void {
 
   function updateResources(): void {
     const status = getServerStatus();
-    const gpu = getGpuInfo();
+    const gpus = getGpuInfo();
     const ram = getRamInfo();
     
     let content = '';
@@ -449,12 +453,15 @@ export function createTUI(): void {
     content += `  {${theme.secondary}-fg}${ram.used} / ${ram.total} MB{/}\n\n`;
     
     // GPU 信息
-    if (gpu) {
+    if (gpus && gpus.length > 0) {
       content += `{bold}GPU VRAM{/bold}\n\n`;
-      const vramBar = createProgressBar(gpu.percent, 20);
-      content += `  ${vramBar} ${gpu.percent}%\n`;
-      content += `  {${theme.secondary}-fg}${gpu.used} / ${gpu.total} MB{/}\n`;
-      content += `  {${theme.secondary}-fg}Temp:{/} ${gpu.temp}°C\n\n`;
+      for (let i = 0; i < gpus.length; i++) {
+        const gpu = gpus[i];
+        const vramBar = createProgressBar(gpu.percent, 16);
+        content += `  GPU${i} ${vramBar} ${gpu.percent}%\n`;
+        content += `    {${theme.secondary}-fg}${gpu.used} / ${gpu.total} MB{/}  {${theme.secondary}-fg}Temp:{/} ${gpu.temp}°C\n`;
+      }
+      content += '\n';
     }
     
     // 服务器参数
@@ -465,6 +472,9 @@ export function createTUI(): void {
       }
       if (currentServerOptions.gpuLayers) {
         content += `  {${theme.secondary}-fg}GPU Layers:{/} ${currentServerOptions.gpuLayers}\n`;
+      }
+      if (currentServerOptions.tensorSplit) {
+        content += `  {${theme.secondary}-fg}Tensor Split:{/} ${currentServerOptions.tensorSplit}\n`;
       }
       if (currentServerOptions.reasoningBudget !== undefined) {
         const thinking = currentServerOptions.reasoningBudget === 0 ? '{yellow-fg}Off{/}' : '{green-fg}On{/}';
@@ -564,6 +574,20 @@ export function createTUI(): void {
     screen.render();
   }
 
+  function getTensorSplitOptions(): string[] {
+    const systemInfo = getSystemInfo();
+    const gpuCount = systemInfo.gpus?.length || 0;
+    if (gpuCount <= 1) return [''];
+    if (gpuCount === 2) return ['', '50,50', '60,40', '70,30', '80,20', '90,10'];
+    const base = Math.floor(100 / gpuCount);
+    const splits = new Array(gpuCount).fill(base);
+    const remainder = 100 - base * gpuCount;
+    if (remainder > 0) {
+      splits[splits.length - 1] += remainder;
+    }
+    return ['', splits.join(',')];
+  }
+
   async function handleStartServer(): Promise<void> {
     const status = getServerStatus();
     
@@ -587,6 +611,7 @@ export function createTUI(): void {
       mmproj: currentModel.mmproj,
       ctxSize: config.defaultCtxSize,
       gpuLayers: config.defaultGpuLayers,
+      tensorSplit: undefined,
       kvCacheType: 'f16',
       chatTemplate: undefined,
       host: '127.0.0.1', // 内部只监听 localhost
@@ -726,6 +751,7 @@ export function createTUI(): void {
       mmproj: model.mmproj,
       ctxSize: preset.ctxSize,
       gpuLayers: preset.gpuLayers,
+      tensorSplit: preset.tensorSplit,
       kvCacheType: preset.kvCacheType || 'f16',
       chatTemplate: preset.chatTemplate,
       host: '127.0.0.1', // 内部只监听 localhost
@@ -960,6 +986,7 @@ export function createTUI(): void {
       mmproj: (preset as any).mmproj,
       ctxSize: preset.ctxSize,
       gpuLayers: preset.gpuLayers,
+      tensorSplit: preset.tensorSplit || '',
       kvCacheType: preset.kvCacheType || 'f16',
       chatTemplate: preset.chatTemplate || '',
       host: (preset as any).host || '0.0.0.0',
@@ -998,8 +1025,8 @@ export function createTUI(): void {
 
     // 当前选中的字段
     let selectedField = 0;
-    const fields = ['ctxSize', 'gpuLayers', 'kvCacheType', 'chatTemplate', 'port', 'host', 'reasoningBudget', 'jinja', 'flashAttn'];
-    const fieldLabels = ['Context Size', 'GPU Layers', 'KV Cache', 'Chat Template', 'Port', 'Host', 'Thinking', 'Jinja', 'Flash Attention'];
+    const fields = ['ctxSize', 'gpuLayers', 'tensorSplit', 'kvCacheType', 'chatTemplate', 'port', 'host', 'reasoningBudget', 'jinja', 'flashAttn'];
+    const fieldLabels = ['Context Size', 'GPU Layers', 'Tensor Split', 'KV Cache', 'Chat Template', 'Port', 'Host', 'Thinking', 'Jinja', 'Flash Attention'];
 
     function renderEditor() {
       let content = `{${theme.muted}-fg}Model:{/} ${editState.model}\n\n`;
@@ -1016,6 +1043,9 @@ export function createTUI(): void {
             break;
           case 'gpuLayers':
             value = String(editState.gpuLayers);
+            break;
+          case 'tensorSplit':
+            value = editState.tensorSplit ? editState.tensorSplit : '{yellow-fg}Auto{/}';
             break;
           case 'kvCacheType':
             value = editState.kvCacheType;
@@ -1071,6 +1101,11 @@ export function createTUI(): void {
               else editState.gpuLayers = Math.max(0, newLayers);
             }
             break;
+          case 'tensorSplit':
+            const splitOptions = getTensorSplitOptions();
+            const splitIdx = splitOptions.indexOf(editState.tensorSplit || '');
+            editState.tensorSplit = splitOptions[(splitIdx + 1) % splitOptions.length];
+            break;
           case 'kvCacheType':
             const kvTypes: Array<'f16' | 'q8_0' | 'q4_0'> = ['f16', 'q8_0', 'q4_0'];
             const kvIdx = kvTypes.indexOf(editState.kvCacheType);
@@ -1124,6 +1159,7 @@ export function createTUI(): void {
           mmproj: editState.mmproj,
           ctxSize: editState.ctxSize,
           gpuLayers: editState.gpuLayers,
+          tensorSplit: editState.tensorSplit || undefined,
           kvCacheType: editState.kvCacheType,
           chatTemplate: editState.chatTemplate || undefined,
           host: editState.host,
@@ -1313,7 +1349,7 @@ export function createTUI(): void {
       right: 1,
       height: 3,
       tags: true,
-      content: `{#87d787-fg}System:{/} ${systemInfo.gpuName || 'No GPU'} | VRAM: ${systemInfo.totalVRAM ? formatSize(systemInfo.totalVRAM) : 'N/A'}\n` +
+      content: `{#87d787-fg}System:{/} ${systemInfo.gpus && systemInfo.gpus.length > 0 ? `${systemInfo.gpus.length} GPU(s)` : (systemInfo.gpuName || 'No GPU')} | VRAM: ${systemInfo.totalVRAM ? formatSize(systemInfo.totalVRAM) : 'N/A'}\n` +
         `{#87d787-fg}Model:{/} ${repo.parameterSize || 'Unknown'} params${repo.isMoE ? ` (MoE, ${repo.activeParams}B active)` : ''}`,
       style: { fg: overlayStyle.fg, bg: overlayStyle.bg },
     });

@@ -37,6 +37,19 @@ lsc
 lsc start --model /path/to/model.gguf
 ```
 
+## Multi-GPU (tensor split)
+
+If you have multiple NVIDIA GPUs, you can split model tensors across devices with `--tensor-split`.
+
+```bash
+# Split across two GPUs evenly
+lsc start --model /path/to/model.gguf --tensor-split 50,50
+
+# Use a preset with tensor split
+lsc preset save my-2x3090
+lsc start my-2x3090
+```
+
 ## Configuration
 
 Config file is stored at:

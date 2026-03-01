@@ -22,6 +22,7 @@ export function createStartCommand(): Command {
     .option('-p, --port <port>', 'Port to listen on', parseInt)
     .option('--no-jinja', 'Disable Jinja template')
     .option('-fa, --flash-attn <mode>', 'Flash attention mode (on/off/auto)')
+    .option('-ts, --tensor-split <split>', 'Tensor split (e.g. 50,50)')
     .option('--reasoning-budget <budget>', 'Reasoning budget (-1=unlimited, 0=disabled)', parseInt)
     .option('-i, --interactive', 'Interactive mode')
     .option('-L, --log-requests', 'Enable request logging proxy (runs in foreground)')
@@ -82,6 +83,7 @@ async function runStart(presetName?: string, cmdOptions?: Record<string, unknown
       jinja: preset.jinja,
       flashAttn: preset.flashAttn,
       reasoningBudget: preset.reasoningBudget,
+      tensorSplit: preset.tensorSplit,
     };
     
     // 查找模型完整路径
@@ -104,6 +106,7 @@ async function runStart(presetName?: string, cmdOptions?: Record<string, unknown
   if (cmdOptions?.port) serverOptions.port = cmdOptions.port as number;
   if (cmdOptions?.jinja === false) serverOptions.jinja = false;
   if (cmdOptions?.flashAttn) serverOptions.flashAttn = cmdOptions.flashAttn as 'on' | 'off' | 'auto';
+  if (cmdOptions?.tensorSplit) serverOptions.tensorSplit = cmdOptions.tensorSplit as string;
   if (cmdOptions?.reasoningBudget !== undefined) serverOptions.reasoningBudget = cmdOptions.reasoningBudget as number;
   
   // 交互模式或缺少必要参数时，进入交互式选择
@@ -199,6 +202,7 @@ async function runStart(presetName?: string, cmdOptions?: Record<string, unknown
     jinja: serverOptions.jinja ?? true,
     flashAttn: serverOptions.flashAttn ?? 'auto',
     reasoningBudget: serverOptions.reasoningBudget ?? -1,
+    tensorSplit: serverOptions.tensorSplit,
   };
   
   // 显示配置
@@ -214,6 +218,9 @@ async function runStart(presetName?: string, cmdOptions?: Record<string, unknown
   console.log(chalk.gray(`  Port:     ${finalOptions.port}`));
   console.log(chalk.gray(`  Jinja:    ${finalOptions.jinja}`));
   console.log(chalk.gray(`  Thinking: ${finalOptions.reasoningBudget === 0 ? 'disabled' : 'enabled'}`));
+  if (finalOptions.tensorSplit) {
+    console.log(chalk.gray(`  Tensor:   ${finalOptions.tensorSplit}`));
+  }
   console.log();
   
   // 如果启用请求日志，调整端口

@@ -15,6 +15,7 @@ export interface ServerOptions {
   mmproj?: string;
   ctxSize: number;
   gpuLayers: number | 'auto';
+  tensorSplit?: string; // e.g. "1,1" or "3,1"
   kvCacheType?: 'f16' | 'q8_0' | 'q4_0';
   chatTemplate?: string;
   host: string;
@@ -34,6 +35,7 @@ export interface Preset {
   mmproj?: string;
   ctxSize: number;
   gpuLayers: number | 'auto';
+  tensorSplit?: string;
   kvCacheType?: 'f16' | 'q8_0' | 'q4_0';
   chatTemplate?: string;
   host: string;

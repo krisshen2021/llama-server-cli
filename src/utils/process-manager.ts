@@ -88,6 +88,11 @@ function buildServerArgs(options: ServerOptions): string[] {
     args.push('-ngl', options.gpuLayers.toString());
   }
 
+  // 多卡张量分配
+  if (options.tensorSplit) {
+    args.push('-ts', options.tensorSplit);
+  }
+
   // KV Cache 量化
   if (options.kvCacheType) {
     args.push('-ctk', options.kvCacheType);

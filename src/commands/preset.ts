@@ -63,6 +63,9 @@ export function createPresetCommand(): Command {
       console.log(`  ${chalk.yellow('model:'.padEnd(18))} ${chalk.white(preset.model)}`);
       console.log(`  ${chalk.yellow('ctxSize:'.padEnd(18))} ${chalk.white(preset.ctxSize)}`);
       console.log(`  ${chalk.yellow('gpuLayers:'.padEnd(18))} ${chalk.white(preset.gpuLayers)}`);
+      if (preset.tensorSplit) {
+        console.log(`  ${chalk.yellow('tensorSplit:'.padEnd(18))} ${chalk.white(preset.tensorSplit)}`);
+      }
       console.log(`  ${chalk.yellow('host:'.padEnd(18))} ${chalk.white(preset.host)}`);
       console.log(`  ${chalk.yellow('port:'.padEnd(18))} ${chalk.white(preset.port)}`);
       console.log(`  ${chalk.yellow('jinja:'.padEnd(18))} ${chalk.white(preset.jinja)}`);
@@ -158,6 +161,13 @@ async function runPresetSave(name: string): Promise<void> {
     },
     {
       type: 'input',
+      name: 'tensorSplit',
+      message: 'Tensor split (e.g. 50,50). Leave empty for auto:',
+      default: existing?.tensorSplit ?? '',
+      filter: (val) => String(val || '').trim(),
+    },
+    {
+      type: 'input',
       name: 'host',
       message: 'Host:',
       default: existing?.host ?? '0.0.0.0',
@@ -203,6 +213,7 @@ async function runPresetSave(name: string): Promise<void> {
     model: answers.model,
     ctxSize: answers.ctxSize,
     gpuLayers: answers.gpuLayers,
+    tensorSplit: answers.tensorSplit || undefined,
     host: answers.host,
     port: answers.port,
     jinja: answers.jinja,

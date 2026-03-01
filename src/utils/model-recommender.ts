@@ -14,6 +14,7 @@ export interface SystemInfo {
   gpuName?: string;
   totalVRAM?: number;    // bytes
   availableVRAM?: number; // bytes
+  gpus?: Array<{ name: string; totalVRAM: number; availableVRAM: number }>;
   cpuCores: number;
 }
 
@@ -90,6 +91,7 @@ export function getSystemInfo(): SystemInfo {
   let gpuName: string | undefined;
   let totalVRAM: number | undefined;
   let availableVRAM: number | undefined;
+  let gpus: Array<{ name: string; totalVRAM: number; availableVRAM: number }> | undefined;
   
   // 尝试获取 NVIDIA GPU 信息
   try {
@@ -97,13 +99,23 @@ export function getSystemInfo(): SystemInfo {
       'nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv,noheader,nounits',
       { encoding: 'utf-8', timeout: 5000 }
     );
-    const lines = output.trim().split('\n');
+    const lines = output.trim().split('\n').filter(Boolean);
     if (lines.length > 0) {
-      const parts = lines[0].split(', ');
-      if (parts.length >= 3) {
-        gpuName = parts[0].trim();
-        totalVRAM = parseInt(parts[1]) * 1024 * 1024; // MB to bytes
-        availableVRAM = parseInt(parts[2]) * 1024 * 1024;
+      gpus = [];
+      for (const line of lines) {
+        const parts = line.split(', ');
+        if (parts.length >= 3) {
+          const name = parts[0].trim();
+          const total = parseInt(parts[1]) * 1024 * 1024;
+          const free = parseInt(parts[2]) * 1024 * 1024;
+          gpus.push({ name, totalVRAM: total, availableVRAM: free });
+        }
+      }
+
+      if (gpus.length > 0) {
+        gpuName = gpus[0].name;
+        totalVRAM = gpus.reduce((sum, g) => sum + g.totalVRAM, 0);
+        availableVRAM = gpus.reduce((sum, g) => sum + g.availableVRAM, 0);
       }
     }
   } catch {
@@ -116,6 +128,7 @@ export function getSystemInfo(): SystemInfo {
     gpuName,
     totalVRAM,
     availableVRAM,
+    gpus,
     cpuCores,
   };
 }
@@ -290,7 +303,12 @@ export function formatSystemInfo(info: SystemInfo): string {
   lines.push(`CPU: ${info.cpuCores} cores`);
   lines.push(`RAM: ${formatSize(info.availableRAM)} / ${formatSize(info.totalRAM)}`);
   
-  if (info.gpuName) {
+  if (info.gpus && info.gpus.length > 0) {
+    lines.push(`GPU: ${info.gpus.map(g => g.name).join(' / ')}`);
+    if (info.totalVRAM) {
+      lines.push(`VRAM (total): ${formatSize(info.availableVRAM || 0)} / ${formatSize(info.totalVRAM)}`);
+    }
+  } else if (info.gpuName) {
     lines.push(`GPU: ${info.gpuName}`);
     if (info.totalVRAM) {
       lines.push(`VRAM: ${formatSize(info.availableVRAM || 0)} / ${formatSize(info.totalVRAM)}`);

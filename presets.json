@@ -1,0 +1,48 @@
+{
+  "qwen35-27b-q4km-no-think": {
+    "model": "Qwen3.5-27B-GGUF/Qwen3.5-27B-Q4_K_M.gguf",
+    "ctxSize": 65536,
+    "gpuLayers": "auto",
+    "kvCacheType": "q4_0",
+    "host": "0.0.0.0",
+    "port": 8080,
+    "jinja": true,
+    "flashAttn": "auto",
+    "reasoningBudget": 0
+  },
+  "qwen35-27b-q4km-think": {
+    "model": "Qwen3.5-27B-GGUF/Qwen3.5-27B-Q4_K_M.gguf",
+    "ctxSize": 32768,
+    "gpuLayers": "auto",
+    "host": "0.0.0.0",
+    "port": 8080,
+    "jinja": true,
+    "flashAttn": "auto",
+    "reasoningBudget": -1,
+    "vision": true
+  },
+  "gemma-27b-q4km-no-think": {
+    "model": "/home/kris/.cache/lm-studio/models/lmstudio-community/mradermacher/Gemma-3-27b-it-vl-GLM-4.7-Flash-HI16-Heretic-Uncensored-Thinking-GGUF/Gemma-3-27b-it-vl-GLM-4.7-Flash-HI16-Heretic-Uncensored-Thinking.Q4_K_M.gguf",
+    "ctxSize": 6144,
+    "gpuLayers": "auto",
+    "kvCacheType": "q4_0",
+    "chatTemplate": "templates/gemma-no-thinking.jinja",
+    "host": "0.0.0.0",
+    "port": 8080,
+    "jinja": true,
+    "flashAttn": "auto",
+    "reasoningBudget": 0
+  },
+  "gemma-27b-q4km-think": {
+    "model": "/home/kris/.cache/lm-studio/models/lmstudio-community/mradermacher/Gemma-3-27b-it-vl-GLM-4.7-Flash-HI16-Heretic-Uncensored-Thinking-GGUF/Gemma-3-27b-it-vl-GLM-4.7-Flash-HI16-Heretic-Uncensored-Thinking.Q4_K_M.gguf",
+    "ctxSize": 6144,
+    "gpuLayers": "auto",
+    "kvCacheType": "q8_0",
+    "chatTemplate": "templates/gemma-thinking.jinja",
+    "host": "0.0.0.0",
+    "port": 8080,
+    "jinja": true,
+    "flashAttn": "auto",
+    "reasoningBudget": -1
+  }
+}

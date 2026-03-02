@@ -29,6 +29,7 @@ blessedElement.prototype.render = function(this: any) {
   }
   return ret;
 };
+blessedElement.prototype._render = blessedElement.prototype.render;
 // --- End monkey patch ---
 
 import { rmSync, readdirSync, writeFileSync } from 'fs';

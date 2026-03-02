@@ -1,5 +1,36 @@
 import blessed from 'blessed';
 import http from 'http';
+
+// --- Monkey patch for rounded borders ---
+const blessedElement = (blessed as any).widget.Element;
+const originalRender = blessedElement.prototype.render;
+blessedElement.prototype.render = function(this: any) {
+  const ret = originalRender.apply(this, arguments);
+  if (this.border && this.border.type === 'line' && this.lpos) {
+    const coords = this.lpos;
+    const lines = this.screen.lines;
+    if (coords.yi >= 0 && coords.yi < lines.length && 
+        coords.yl > 0 && coords.yl <= lines.length) {
+      const yi = coords.yi, yl = coords.yl - 1;
+      const xi = coords.xi, xl = coords.xl - 1;
+      if (lines[yi] && lines[yi][xi] && lines[yi][xi][1] === '\u250c') {
+        lines[yi][xi][1] = '\u256d'; lines[yi].dirty = true; // ╭
+      }
+      if (lines[yi] && lines[yi][xl] && lines[yi][xl][1] === '\u2510') {
+        lines[yi][xl][1] = '\u256e'; lines[yi].dirty = true; // ╮
+      }
+      if (lines[yl] && lines[yl][xi] && lines[yl][xi][1] === '\u2514') {
+        lines[yl][xi][1] = '\u2570'; lines[yl].dirty = true; // ╰
+      }
+      if (lines[yl] && lines[yl][xl] && lines[yl][xl][1] === '\u2518') {
+        lines[yl][xl][1] = '\u256f'; lines[yl].dirty = true; // ╯
+      }
+    }
+  }
+  return ret;
+};
+// --- End monkey patch ---
+
 import { rmSync, readdirSync, writeFileSync } from 'fs';
 import { basename, dirname, isAbsolute, join } from 'path';
 import { execSync } from 'child_process';

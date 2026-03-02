@@ -1414,6 +1414,7 @@ export function createTUI(): void {
 
     inputBox.on('cancel', () => {
       inputBox.destroy();
+      menuBox.focus();
       screen.render();
     });
 
@@ -1588,6 +1589,7 @@ export function createTUI(): void {
 
     selectBox.key(['escape'], () => {
       overlay.destroy();
+      menuBox.focus();
       screen.render();
     });
   }
@@ -2294,6 +2296,7 @@ export function createTUI(): void {
     downloadManagerInfo = null;
     downloadManagerHelp = null;
     downloadManagerVisible = false;
+    menuBox.focus();
     screen.render();
   }
 

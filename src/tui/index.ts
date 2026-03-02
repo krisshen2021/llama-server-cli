@@ -1389,7 +1389,6 @@ export function createTUI(): void {
       padding: { left: 1, right: 1 },
       inputOnFocus: true,
       censor: false,
-      value: 'bartowski/',
     });
 
     inputBox.focus();

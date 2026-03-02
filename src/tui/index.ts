@@ -135,16 +135,29 @@ export function createTUI(): void {
   let activeDownloadTaskIds = new Map<string, string>();
   let downloadStatusInterval: ReturnType<typeof setInterval> | null = null;
 
-  // 颜色主题 - 暗色风格，类似 OpenCode
+  // 颜色主题 - 现代护眼风格 (Catppuccin Macchiato)
   const theme = {
-    primary: '#5f87ff',    // 蓝紫色
-    secondary: '#5fafff',  // 亮蓝色
-    success: '#87d787',    // 柔和绿
-    warning: '#d7af5f',    // 柔和黄
-    error: '#d75f5f',      // 柔和红
-    muted: '#585858',      // 暗灰
-    text: '#c0c0c0',       // 浅灰文字
-    border: '#444444',     // 边框灰
+    // 品牌色 & 强调色
+    primary: '#cba6f7',    // Mauve (紫罗兰，原蓝紫)
+    secondary: '#8caaee',  // Sapphire (蓝宝石，原亮蓝)
+    
+    // 状态色
+    success: '#a6e3a1',    // Green (柔和绿)
+    warning: '#f9e2af',    // Yellow (琥珀黄)
+    error: '#f38ba8',      // Red (珊瑚红)
+    info: '#89b4fa',       // Blue (信息蓝)
+    
+    // 背景与表面层级
+    bg: '#24273a',         // Base (深暗灰蓝，主背景)
+    surface0: '#363a4f',   // Surface0 (面板/状态栏背景)
+    surface1: '#494d64',   // Surface1 (高亮悬浮背景/选中态背景)
+    surface2: '#5b6078',   // Surface2 (深色边框)
+    
+    // 文本与图标
+    text: '#cad3f5',       // Text (主要浅灰文字)
+    subtext: '#a5adcb',    // Subtext1 (次要文字)
+    muted: '#8087a2',      // Overlay1 (暗灰/禁用状态)
+    border: '#494d64',     // Surface1 (普通边框灰)
   };
 
   // === 布局组件 ===
@@ -164,7 +177,7 @@ export function createTUI(): void {
     tags: true,
     style: {
       fg: theme.text,
-      bg: '#0c0c0c',
+      bg: theme.bg,
     },
     padding: { left: 2, top: 1 },
   });
@@ -181,6 +194,7 @@ export function createTUI(): void {
     border: { type: 'line' },
     style: {
       fg: theme.text,
+      bg: theme.surface0,
       border: { fg: theme.border },
     },
     padding: { left: 1, right: 1 },
@@ -198,8 +212,9 @@ export function createTUI(): void {
     border: { type: 'line' },
     style: {
       fg: theme.text,
+      bg: theme.bg,
       border: { fg: theme.border },
-      selected: { bg: theme.primary, fg: '#000000', bold: true },
+      selected: { bg: theme.surface1, fg: theme.primary, bold: true },
       item: { fg: theme.text },
     },
     keys: true,
@@ -233,8 +248,9 @@ export function createTUI(): void {
     border: { type: 'line' },
     style: {
       fg: theme.text,
+      bg: theme.bg,
       border: { fg: theme.border },
-      selected: { bg: theme.primary, fg: '#000000', bold: true },
+      selected: { bg: theme.surface1, fg: theme.primary, bold: true },
       item: { fg: theme.text },
     },
     keys: true,
@@ -257,8 +273,9 @@ export function createTUI(): void {
     border: { type: 'line' },
     style: {
       fg: theme.text,
+      bg: theme.bg,
       border: { fg: theme.border },
-      selected: { bg: theme.primary, fg: '#000000', bold: true },
+      selected: { bg: theme.surface1, fg: theme.primary, bold: true },
       item: { fg: theme.text },
     },
     keys: true,
@@ -282,6 +299,7 @@ export function createTUI(): void {
     content: '',
     style: {
       fg: theme.text,
+      bg: theme.bg,
       border: { fg: theme.border },
     },
     padding: { left: 1, right: 1, top: 1 },
@@ -300,6 +318,7 @@ export function createTUI(): void {
     content: '',
     style: {
       fg: theme.text,
+      bg: theme.bg,
       border: { fg: theme.border },
     },
     padding: { left: 1, right: 1, top: 1 },
@@ -318,11 +337,12 @@ export function createTUI(): void {
     scrollable: true,
     alwaysScroll: true,
     scrollbar: {
-      ch: '│',
-      style: { fg: theme.muted },
+      ch: '█',
+      style: { fg: theme.surface2 },
     },
     style: {
       fg: theme.text,
+      bg: theme.bg,
       border: { fg: theme.border },
     },
     mouse: true,
@@ -342,11 +362,12 @@ export function createTUI(): void {
     scrollable: true,
     alwaysScroll: true,
     scrollbar: {
-      ch: '│',
-      style: { fg: theme.muted },
+      ch: '█',
+      style: { fg: theme.surface2 },
     },
     style: {
       fg: theme.text,
+      bg: theme.bg,
       border: { fg: theme.secondary },
     },
     mouse: true,
@@ -363,8 +384,8 @@ export function createTUI(): void {
     content: `{center}{${theme.secondary}-fg}↑↓{/} Navigate {${theme.muted}-fg}│{/} {${theme.secondary}-fg}Enter{/} Select {${theme.muted}-fg}│{/} {${theme.secondary}-fg}Tab{/} Switch {${theme.muted}-fg}│{/} {${theme.secondary}-fg}r{/} Refresh {${theme.muted}-fg}│{/} {${theme.secondary}-fg}l{/} Pause Logs {${theme.muted}-fg}│{/} {${theme.secondary}-fg}q{/} Quit{/center}`,
     tags: true,
     style: {
-      fg: theme.text,
-      bg: '#121212',
+      fg: theme.subtext,
+      bg: theme.surface0,
     },
     valign: 'middle',
   });
@@ -380,25 +401,25 @@ export function createTUI(): void {
 
     if (status.running || proxyServer) {
       const modelName = basename(status.model || 'Unknown');
-      const proxyStatus = proxyServer ? '{green-fg}●{/green-fg}' : '{red-fg}●{/red-fg}';
-      content = `{green-fg}●{/green-fg} Running  |  ` +
-        `{cyan-fg}PID:{/cyan-fg} ${status.pid}  |  ` +
-        `{cyan-fg}Port:{/cyan-fg} ${currentPublicPort}  |  ` +
-        `{cyan-fg}Proxy:{/cyan-fg} ${proxyStatus}  |  ` +
-        `{cyan-fg}Model:{/cyan-fg} ${modelName}`;
+      const proxyStatus = proxyServer ? `{${theme.success}-fg}●{/}` : `{${theme.error}-fg}●{/}`;
+      content = `{${theme.success}-fg}●{/} Running  |  ` +
+        `{${theme.secondary}-fg}PID:{/} ${status.pid}  |  ` +
+        `{${theme.secondary}-fg}Port:{/} ${currentPublicPort}  |  ` +
+        `{${theme.secondary}-fg}Proxy:{/} ${proxyStatus}  |  ` +
+        `{${theme.secondary}-fg}Model:{/} ${modelName}`;
       if (activeProgress.active) {
-        content += `  |  {#5fafff-fg}⬇ ${activeProgress.label}{/} {#87d787-fg}${activeProgress.percent}%{/} {#585858-fg}[S] Show{/}`;
+        content += `  |  {${theme.info}-fg}⬇ ${activeProgress.label}{/} {${theme.success}-fg}${activeProgress.percent}%{/} {${theme.muted}-fg}[S] Show{/}`;
       }
       if (incompleteCount > 0) {
-        content += `  |  {yellow-fg}⚠ ${incompleteCount} incomplete download(s){/yellow-fg}`;
+        content += `  |  {${theme.warning}-fg}⚠ ${incompleteCount} incomplete download(s){/}`;
       }
     } else {
-      content = `{red-fg}●{/red-fg} Not Running`;
+      content = `{${theme.error}-fg}●{/} Not Running`;
       if (activeProgress.active) {
-        content += `  |  {#5fafff-fg}⬇ ${activeProgress.label}{/} {#87d787-fg}${activeProgress.percent}%{/} {#585858-fg}[S] Show{/}`;
+        content += `  |  {${theme.info}-fg}⬇ ${activeProgress.label}{/} {${theme.success}-fg}${activeProgress.percent}%{/} {${theme.muted}-fg}[S] Show{/}`;
       }
       if (incompleteCount > 0) {
-        content += `  |  {yellow-fg}⚠ ${incompleteCount} incomplete download(s){/yellow-fg}`;
+        content += `  |  {${theme.warning}-fg}⚠ ${incompleteCount} incomplete download(s){/}`;
       }
     }
 
@@ -413,27 +434,27 @@ export function createTUI(): void {
     let content = '';
     
     if (status.running) {
-      const proxyStatus = proxyServer ? '{green-fg}Running{/green-fg}' : '{red-fg}Not Running{/red-fg}';
+      const proxyStatus = proxyServer ? `{${theme.success}-fg}Running{/}` : `{${theme.error}-fg}Not Running{/}`;
       content = `{bold}Server Status{/bold}\n\n` +
-        `  {cyan-fg}Status:{/cyan-fg}     {green-fg}Running{/green-fg}\n` +
-        `  {cyan-fg}PID:{/cyan-fg}        ${status.pid}\n` +
-        `  {cyan-fg}Model:{/cyan-fg}      ${basename(status.model || '')}\n\n` +
+        `  {${theme.secondary}-fg}Status:{/}     {${theme.success}-fg}Running{/}\n` +
+        `  {${theme.secondary}-fg}PID:{/}        ${status.pid}\n` +
+        `  {${theme.secondary}-fg}Model:{/}      ${basename(status.model || '')}\n\n` +
         `{bold}Network{/bold}\n\n` +
-        `  {cyan-fg}Public URL:{/cyan-fg}  http://localhost:${currentPublicPort}\n` +
-        `  {cyan-fg}Internal:{/cyan-fg}    http://127.0.0.1:${currentInternalPort}\n` +
-        `  {cyan-fg}Proxy:{/cyan-fg}       ${proxyStatus}\n`;
+        `  {${theme.secondary}-fg}Public URL:{/}  http://localhost:${currentPublicPort}\n` +
+        `  {${theme.secondary}-fg}Internal:{/}    http://127.0.0.1:${currentInternalPort}\n` +
+        `  {${theme.secondary}-fg}Proxy:{/}       ${proxyStatus}\n`;
       
       if (status.startTime) {
         const uptime = formatUptime(Date.now() - status.startTime.getTime());
-        content += `\n  {cyan-fg}Uptime:{/cyan-fg}     ${uptime}\n`;
+        content += `\n  {${theme.secondary}-fg}Uptime:{/}     ${uptime}\n`;
       }
     } else {
       content = `{bold}Server Status{/bold}\n\n` +
-        `  {cyan-fg}Status:{/cyan-fg}     {red-fg}Not Running{/red-fg}\n\n` +
+        `  {${theme.secondary}-fg}Status:{/}     {${theme.error}-fg}Not Running{/}\n\n` +
         `{bold}Configuration{/bold}\n\n` +
-        `  {cyan-fg}Models Dir:{/cyan-fg}  ${config.modelsDir}\n` +
-        `  {cyan-fg}Server:{/cyan-fg}      ${config.llamaServerPath}\n` +
-        `  {cyan-fg}Default Port:{/cyan-fg} ${config.defaultPort}\n`;
+        `  {${theme.secondary}-fg}Models Dir:{/}  ${config.modelsDir}\n` +
+        `  {${theme.secondary}-fg}Server:{/}      ${config.llamaServerPath}\n` +
+        `  {${theme.secondary}-fg}Default Port:{/} ${config.defaultPort}\n`;
     }
 
     infoBox.setContent(content);
@@ -515,7 +536,7 @@ export function createTUI(): void {
     let color = theme.success;
     if (percent > 80) color = theme.error;
     else if (percent > 60) color = theme.warning;
-    return `{${color}-fg}${'█'.repeat(filled)}{/}{${theme.muted}-fg}${'░'.repeat(empty)}{/}`;
+    return `{${color}-fg}${'█'.repeat(filled)}{/}{${theme.surface2}-fg}${'░'.repeat(empty)}{/}`;
   }
 
   function updateLogs(): void {
@@ -549,7 +570,7 @@ export function createTUI(): void {
   function loadModels(): void {
     models = scanModels();
     const items = models.map(m => {
-      const vision = m.mmproj ? ' {blue-fg}[Vision]{/blue-fg}' : '';
+      const vision = m.mmproj ? ` {${theme.info}-fg}[Vision]{/}` : '';
       return ` ${basename(m.path)}${vision}`;
     });
     modelList.setItems(items);
@@ -561,9 +582,9 @@ export function createTUI(): void {
     const config = getExpandedConfig();
     const items = presetNames.map(name => {
       const p = presets[name];
-      let thinking = '{green-fg}[think]{/green-fg}';
+      let thinking = `{${theme.success}-fg}[think]{/}`;
       if (p.reasoningBudget === 0) {
-        thinking = '{yellow-fg}[no-think]{/yellow-fg}';
+        thinking = `{${theme.warning}-fg}[no-think]{/}`;
       }
       return ` ${name} ${thinking}`;
     });
@@ -906,10 +927,11 @@ export function createTUI(): void {
       height: 9,
       label: ' Delete Model ',
       tags: true,
+      shadow: true,
       border: { type: 'line' },
       style: {
         fg: theme.text,
-        bg: '#1c1c1c',
+        bg: theme.surface0,
         border: { fg: theme.error },
       },
       padding: { left: 2, right: 2, top: 1 },
@@ -985,10 +1007,11 @@ export function createTUI(): void {
       height: 7,
       label: ' Delete Preset ',
       tags: true,
+      shadow: true,
       border: { type: 'line' },
       style: {
         fg: theme.text,
-        bg: '#1c1c1c',
+        bg: theme.surface0,
         border: { fg: theme.error },
       },
       padding: { left: 2, right: 2, top: 1 },
@@ -1071,10 +1094,11 @@ export function createTUI(): void {
       height: 20,
       label: ` Edit: ${presetName} `,
       tags: true,
+      shadow: true,
       border: { type: 'line' },
       style: {
         fg: theme.text,
-        bg: '#1c1c1c',
+        bg: theme.surface0,
         border: { fg: theme.primary },
       },
       padding: { left: 2, right: 2, top: 1 },
@@ -1308,10 +1332,10 @@ export function createTUI(): void {
 
   // 浮层统一样式
   const overlayStyle = {
-    fg: '#e8e8e8',
-    bg: '#2d2d2d',
+    fg: theme.text,
+    bg: theme.surface0,
     border: { fg: theme.primary },
-    selected: { bg: '#3a3a3a', fg: '#ffffff', bold: true },
+    selected: { bg: theme.surface1, fg: theme.primary, bold: true },
   };
 
   async function showDownloadModel(): Promise<void> {
@@ -1324,13 +1348,17 @@ export function createTUI(): void {
       height: 3,
       label: ' Enter HuggingFace Model ID ',
       tags: true,
+      shadow: true,
       border: { type: 'line' },
       style: {
         fg: overlayStyle.fg,
         bg: overlayStyle.bg,
         border: overlayStyle.border,
       },
+      padding: { left: 1, right: 1 },
       inputOnFocus: true,
+      censor: false,
+      value: 'bartowski/',
     });
 
     inputBox.focus();
@@ -1371,8 +1399,9 @@ export function createTUI(): void {
       width: 50,
       height: 5,
       tags: true,
+      shadow: true,
       border: { type: 'line' },
-      content: `{center}{#ffffff-fg}Fetching model info...{/}\n\n{#87d787-fg}${modelId}{/}{/center}`,
+      content: `{center}{${theme.text}-fg}Fetching model info...{/}\n\n{${theme.success}-fg}${modelId}{/}{/center}`,
       style: {
         fg: overlayStyle.fg,
         bg: overlayStyle.bg,
@@ -1445,6 +1474,7 @@ export function createTUI(): void {
       height: overlayHeight,
       label: ` Select Quantization(s) - ${repo.modelId} `,
       tags: true,
+      shadow: true,
       border: { type: 'line' },
       style: {
         fg: overlayStyle.fg,
@@ -1574,6 +1604,7 @@ export function createTUI(): void {
       height: overlayHeight,
       label: ` Select Files to Download `,
       tags: true,
+      shadow: true,
       border: { type: 'line' },
       style: {
         fg: overlayStyle.fg,
@@ -1847,6 +1878,7 @@ export function createTUI(): void {
       height: Math.min(presetNameList.length + 8, 15),
       label: ' Download Complete ',
       tags: true,
+      shadow: true,
       border: { type: 'line' },
       style: {
         fg: overlayStyle.fg,
@@ -1888,7 +1920,7 @@ export function createTUI(): void {
   function createDownloadBar(percent: number, width: number): string {
     const filled = Math.round((percent / 100) * width);
     const empty = width - filled;
-    return `{#87d787-fg}${'█'.repeat(filled)}{/}{#585858-fg}${'░'.repeat(empty)}{/}`;
+    return `{${theme.success}-fg}${'█'.repeat(filled)}{/}{${theme.surface2}-fg}${'░'.repeat(empty)}{/}`;
   }
 
   function getChatTemplateOptions(modelDir: string, globalTemplatesDir: string): string[] {
@@ -2038,6 +2070,7 @@ export function createTUI(): void {
       height: overlayHeight,
       label: ' Download Manager ',
       tags: true,
+      shadow: true,
       border: { type: 'line' },
       style: {
         fg: overlayStyle.fg,
@@ -2248,6 +2281,7 @@ export function createTUI(): void {
         height: 8,
         label: ' Confirm Delete ',
         tags: true,
+        shadow: true,
         border: { type: 'line' },
         style: {
           fg: overlayStyle.fg,
@@ -2296,10 +2330,11 @@ export function createTUI(): void {
         height: 9,
         label: ' Exit ',
         tags: true,
+        shadow: true,
         border: { type: 'line' },
         style: {
           fg: theme.text,
-          bg: '#1c1c1c',
+          bg: theme.surface0,
           border: { fg: theme.warning },
         },
         padding: { left: 2, right: 2, top: 1 },

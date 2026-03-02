@@ -1552,7 +1552,7 @@ export function createTUI(): void {
       right: 1,
       height: 2,
       tags: true,
-      content: `{#585858-fg}[Space] Toggle | [Enter] Continue | [Esc] Cancel{/}`,
+      content: `{center}{${theme.secondary}-fg}Space{/} Toggle {${theme.muted}-fg}│{/} {${theme.secondary}-fg}Enter{/} Continue {${theme.muted}-fg}│{/} {${theme.secondary}-fg}Esc{/} Cancel{/center}`,
       style: { fg: overlayStyle.fg, bg: overlayStyle.bg },
     });
 
@@ -1682,7 +1682,7 @@ export function createTUI(): void {
       right: 1,
       height: 2,
       tags: true,
-      content: `{#585858-fg}[Space] Toggle | [Enter] Download | [Esc] Back{/}`,
+      content: `{center}{${theme.secondary}-fg}Space{/} Toggle {${theme.muted}-fg}│{/} {${theme.secondary}-fg}Enter{/} Download {${theme.muted}-fg}│{/} {${theme.secondary}-fg}Esc{/} Back{/center}`,
       style: { fg: overlayStyle.fg, bg: overlayStyle.bg },
     });
 
@@ -2147,7 +2147,7 @@ export function createTUI(): void {
       right: 1,
       height: 2,
       tags: true,
-      content: '{#585858-fg}[Space] Select | [A] All | [P] Pause | [H] Hide | [D] Delete | [Esc] Back{/}',
+      content: `{center}{${theme.secondary}-fg}Space{/} Select {${theme.muted}-fg}│{/} {${theme.secondary}-fg}A{/} All {${theme.muted}-fg}│{/} {${theme.secondary}-fg}P{/} Pause {${theme.muted}-fg}│{/} {${theme.secondary}-fg}D{/} Delete {${theme.muted}-fg}│{/} {${theme.secondary}-fg}Esc{/} Back{/center}`,
       style: { fg: overlayStyle.fg, bg: overlayStyle.bg },
     });
 

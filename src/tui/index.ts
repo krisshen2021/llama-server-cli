@@ -208,7 +208,7 @@ export function createTUI(): void {
     tags: true,
     style: {
       fg: theme.text,
-      bg: theme.bg,
+      transparent: true,
     },
     padding: { left: 2, top: 1 },
   });
@@ -243,7 +243,7 @@ export function createTUI(): void {
     border: { type: 'line' },
     style: {
       fg: theme.text,
-      bg: theme.bg,
+      transparent: true,
       border: { fg: theme.border },
       selected: { bg: theme.surface1, fg: theme.primary, bold: true },
       item: { fg: theme.text },
@@ -279,7 +279,7 @@ export function createTUI(): void {
     border: { type: 'line' },
     style: {
       fg: theme.text,
-      bg: theme.bg,
+      transparent: true,
       border: { fg: theme.border },
       selected: { bg: theme.surface1, fg: theme.primary, bold: true },
       item: { fg: theme.text },
@@ -304,7 +304,7 @@ export function createTUI(): void {
     border: { type: 'line' },
     style: {
       fg: theme.text,
-      bg: theme.bg,
+      transparent: true,
       border: { fg: theme.border },
       selected: { bg: theme.surface1, fg: theme.primary, bold: true },
       item: { fg: theme.text },
@@ -330,7 +330,7 @@ export function createTUI(): void {
     content: '',
     style: {
       fg: theme.text,
-      bg: theme.bg,
+      transparent: true,
       border: { fg: theme.border },
     },
     padding: { left: 1, right: 1, top: 1 },
@@ -349,7 +349,7 @@ export function createTUI(): void {
     content: '',
     style: {
       fg: theme.text,
-      bg: theme.bg,
+      transparent: true,
       border: { fg: theme.border },
     },
     padding: { left: 1, right: 1, top: 1 },
@@ -373,7 +373,7 @@ export function createTUI(): void {
     },
     style: {
       fg: theme.text,
-      bg: theme.bg,
+      transparent: true,
       border: { fg: theme.border },
     },
     mouse: true,
@@ -398,7 +398,7 @@ export function createTUI(): void {
     },
     style: {
       fg: theme.text,
-      bg: theme.bg,
+      transparent: true,
       border: { fg: theme.secondary },
     },
     mouse: true,

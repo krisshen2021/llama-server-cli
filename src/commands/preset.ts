@@ -308,6 +308,17 @@ async function runPresetSave(name: string): Promise<void> {
       // 仅 draft-* 系需要草稿模块(draft-mtp 时作为内置 MTP 的覆盖通道)
       when: (a) => typeof a.specType === 'string' && a.specType.startsWith('draft-'),
     },
+    {
+      type: 'input',
+      name: 'specDraftMax',
+      message: 'Draft tokens per step, --spec-draft-n-max (0=default; DFlash2 建议 7):',
+      default: existing?.specDraftMax ?? 0,
+      when: (a) => typeof a.specType === 'string' && a.specType.startsWith('draft-'),
+      filter: (val) => {
+        const parsed = parseInt(String(val).trim());
+        return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+      },
+    },
   ]);
   
   const preset: Preset = {
@@ -331,6 +342,8 @@ async function runPresetSave(name: string): Promise<void> {
     // specModel 仅在 draft-* 系下保留(此时字段已显示,answers.specModel 必有值);
     // 其他类型保留会让 llama.cpp 把用不到的 draft 白加载进 VRAM
     specModel: answers.specType.startsWith('draft-') ? (answers.specModel || undefined) : undefined,
+    // 草稿 token 数;0 = 不写(用 llama.cpp 默认值)
+    specDraftMax: answers.specDraftMax > 0 ? answers.specDraftMax : undefined,
     // slotSavePath 同理:交互流程不提供该字段,已配置的值(TUI 开关或手工设置)原样保留
     slotSavePath: existing?.slotSavePath,
   };

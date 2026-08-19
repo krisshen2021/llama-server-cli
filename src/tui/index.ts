@@ -1500,6 +1500,7 @@ export function createTUI(): void {
       flashAttn: preset.flashAttn,
       specType: preset.specType || '',
       specModel: preset.specModel || '',
+      specDraftMax: preset.specDraftMax ?? 0,
       slotSave: !!preset.slotSavePath,
     };
 
@@ -1521,7 +1522,7 @@ export function createTUI(): void {
     // 草稿模型选项:扫描 modelsDir 里的 mtp-*/DFlash/DSpark 等文件,'' 表示 Auto(启动时自动配对)
     const specModelOptions = ['', ...findDraftModelFiles(config.modelsDir)];
 
-    // 创建编辑对话框(高度自适应终端,超出可滚动:19 个字段 + Model 行 + 帮助行在 height:21 下会截断尾部字段)
+    // 创建编辑对话框(高度自适应终端,超出可滚动:20 个字段 + Model 行 + 帮助行在 height:21 下会截断尾部字段)
     const editor = blessed.box({
       parent: screen,
       top: 'center',
@@ -1546,8 +1547,8 @@ export function createTUI(): void {
 
     // 当前选中的字段
     let selectedField = 0;
-    const fields = ['ctxSize', 'gpuLayers', 'tensorSplit', 'useVision', 'fit', 'batchSize', 'threadsBatch', 'cachePrompt', 'cacheReuse', 'kvCacheType', 'chatTemplate', 'port', 'host', 'reasoningBudget', 'jinja', 'flashAttn', 'specType', 'specModel', 'slotSave'];
-    const fieldLabels = ['Context Size', 'GPU Layers', 'Tensor Split', 'Vision', 'Fit', 'Batch Size', 'Threads Batch', 'Cache Prompt', 'Cache Reuse', 'KV Cache', 'Chat Template', 'Port', 'Host', 'Thinking', 'Jinja', 'Flash Attention', 'Spec Type', 'Spec Model', 'Slot Save'];
+    const fields = ['ctxSize', 'gpuLayers', 'tensorSplit', 'useVision', 'fit', 'batchSize', 'threadsBatch', 'cachePrompt', 'cacheReuse', 'kvCacheType', 'chatTemplate', 'port', 'host', 'reasoningBudget', 'jinja', 'flashAttn', 'specType', 'specModel', 'specDraftMax', 'slotSave'];
+    const fieldLabels = ['Context Size', 'GPU Layers', 'Tensor Split', 'Vision', 'Fit', 'Batch Size', 'Threads Batch', 'Cache Prompt', 'Cache Reuse', 'KV Cache', 'Chat Template', 'Port', 'Host', 'Thinking', 'Jinja', 'Flash Attention', 'Spec Type', 'Spec Model', 'Spec Draft N', 'Slot Save'];
 
     function renderEditor() {
       let content = `{${theme.muted}-fg}Model:{/} ${editState.model}\n\n`;
@@ -1613,6 +1614,9 @@ export function createTUI(): void {
           case 'specModel':
             // 路径太长塞不进 60 宽对话框,只显示文件名(选项均来自 modelsDir 扫描)
             value = editState.specModel ? basename(editState.specModel) : '{yellow-fg}Auto{/}';
+            break;
+          case 'specDraftMax':
+            value = editState.specDraftMax ? String(editState.specDraftMax) : '{yellow-fg}Default{/}';
             break;
           case 'slotSave':
             value = editState.slotSave ? '{green-fg}On{/}' : '{yellow-fg}Off{/}';
@@ -1733,6 +1737,12 @@ export function createTUI(): void {
           const specModelIdx = specModelOptions.indexOf(editState.specModel);
           editState.specModel = specModelOptions[(specModelIdx + 1) % specModelOptions.length];
           break;
+        case 'specDraftMax':
+          // 0 = Default(交给 llama.cpp 默认 3);DFlash2 官方建议 7
+          const draftMaxSteps = [0, 3, 5, 7, 8, 16];
+          const draftMaxIdx = draftMaxSteps.indexOf(editState.specDraftMax);
+          editState.specDraftMax = draftMaxSteps[(draftMaxIdx + 1) % draftMaxSteps.length];
+          break;
         case 'slotSave':
           editState.slotSave = !editState.slotSave;
           break;
@@ -1782,6 +1792,8 @@ export function createTUI(): void {
           // specModel 仅在 draft-* 系下有意义(draft-mtp 时为内置 MTP 的覆盖通道);
           // 其他类型保留会让 llama.cpp 把用不到的 draft 白加载进 VRAM
           specModel: editState.specType.startsWith('draft-') ? (editState.specModel || undefined) : undefined,
+          // 草稿 token 数;0 = 不写(用 llama.cpp 默认值),与 specType 解耦,任何 draft 系都可调
+          specDraftMax: editState.specDraftMax > 0 ? editState.specDraftMax : undefined,
           // On 时优先保留已有的自定义路径(编辑器不管理具体目录,与 specModel 同理);
           // 没有时才写默认目录;Off 时为 undefined,JSON.stringify 会丢弃该键(即禁用)
           slotSavePath: editState.slotSave ? (preset.slotSavePath || getDefaultSlotSavePath()) : undefined,

@@ -212,6 +212,14 @@ describe('buildServerArgs 投机解码参数', () => {
     expect(args).not.toContain('--model-draft');
   });
 
+  test('specDraftMax:输出 --spec-draft-n-max;为 0/未设时不输出', () => {
+    const args = buildServerArgs({ ...makeArgsOptions(), specType: 'draft-dflash', specDraftMax: 7 });
+    const idx = args.indexOf('--spec-draft-n-max');
+    expect(idx).toBeGreaterThanOrEqual(0);
+    expect(args[idx + 1]).toBe('7');
+    expect(buildServerArgs(makeArgsOptions())).not.toContain('--spec-draft-n-max');
+  });
+
   test('--alias:取模型文件名去路径与扩展名', () => {
     const args = buildServerArgs({ ...makeArgsOptions(), model: '/models/org/repo/Qwen3.5-9B-Q4_K_M.gguf' });
     const idx = args.indexOf('--alias');

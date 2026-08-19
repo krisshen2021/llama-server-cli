@@ -40,6 +40,7 @@ export interface ServerOptions {
   logRequests?: boolean; // 是否启用请求日志代理
   specType?: string;  // 投机解码类型(--spec-type,如 draft-mtp)
   specModel?: string; // draft/MTP 模块路径(--model-draft)
+  specDraftMax?: number; // 每次验证的草稿 token 数(--spec-draft-n-max);DFlash2 官方建议 7
   slotSavePath?: string; // 会话 KV 持久化目录(--slot-save-path);undefined = 禁用
 }
 
@@ -66,6 +67,7 @@ export interface Preset {
   cacheReuse?: number;
   specType?: string;  // 投机解码类型(--spec-type,如 draft-mtp)
   specModel?: string; // draft/MTP 模块路径(--model-draft)
+  specDraftMax?: number; // 每次验证的草稿 token 数(--spec-draft-n-max);DFlash2 官方建议 7
   slotSavePath?: string; // 会话 KV 持久化目录(--slot-save-path);undefined = 禁用
 }
 

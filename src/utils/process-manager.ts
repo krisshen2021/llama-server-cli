@@ -258,6 +258,9 @@ export function buildServerArgs(options: ServerOptions): string[] {
   if (options.specModel) {
     args.push('--model-draft', options.specModel);
   }
+  if (options.specDraftMax) {
+    args.push('--spec-draft-n-max', String(options.specDraftMax));
+  }
 
   // 自定义 chat template
   if (options.chatTemplate) {

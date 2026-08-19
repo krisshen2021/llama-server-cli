@@ -3,9 +3,12 @@
  * 根据系统配置推荐最佳量化版本
  */
 
-import { execSync } from 'child_process';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import os from 'os';
 import { HFRepo, formatSize } from './hf-api.js';
+
+const execFileP = promisify(execFile);
 
 // 系统信息
 export interface SystemInfo {
@@ -81,9 +84,9 @@ const DEFAULT_CONTEXT = 32768;
 const MIN_CONTEXT = 4096;
 
 /**
- * 获取系统信息
+ * 获取系统信息(异步,nvidia-smi 不再阻塞事件循环)
  */
-export function getSystemInfo(): SystemInfo {
+export async function getSystemInfo(): Promise<SystemInfo> {
   const totalRAM = os.totalmem();
   const freeRAM = os.freemem();
   const cpuCores = os.cpus().length;
@@ -95,11 +98,12 @@ export function getSystemInfo(): SystemInfo {
   
   // 尝试获取 NVIDIA GPU 信息
   try {
-    const output = execSync(
-      'nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv,noheader,nounits',
+    const { stdout } = await execFileP(
+      'nvidia-smi',
+      ['--query-gpu=name,memory.total,memory.free', '--format=csv,noheader,nounits'],
       { encoding: 'utf-8', timeout: 5000 }
     );
-    const lines = output.trim().split('\n').filter(Boolean);
+    const lines = stdout.trim().split('\n').filter(Boolean);
     if (lines.length > 0) {
       gpus = [];
       for (const line of lines) {
@@ -135,10 +139,17 @@ export function getSystemInfo(): SystemInfo {
 
 /**
  * 估算模型大小
+ * 所选量化在 repo.files 中有真实 LFS 大小时优先用真实值,否则按参数量估算
+ * @param repo 仓库信息(含文件列表)
+ * @param quantization 量化类型
  * @param paramCount 参数量（以 B 为单位）
  * @param bitsPerWeight 每参数比特数
  */
-function estimateModelSize(paramCount: number, bitsPerWeight: number): number {
+function estimateModelSize(repo: HFRepo, quantization: string, paramCount: number, bitsPerWeight: number): number {
+  const realSize = repo.files
+    .filter(f => f.isMainModel && f.quantization === quantization)
+    .reduce((sum, f) => sum + f.size, 0);
+  if (realSize > 0) return realSize;
   // 参数量 * 比特数 / 8 = 字节数
   // 加上约 10% 的额外开销（元数据等）
   return paramCount * 1e9 * bitsPerWeight / 8 * 1.1;
@@ -191,7 +202,10 @@ export function analyzeQuantizations(
   desiredContext: number = DEFAULT_CONTEXT
 ): QuantizationEstimate[] {
   const estimates: QuantizationEstimate[] = [];
-  const vram = systemInfo.totalVRAM || 0;
+  // 判断基准是物理总显存:量化选择回答的是"这块卡能不能跑",当前空闲显存是
+  // 瞬时值(可能有别的模型在跑),且选择器头部展示的也是总显存,两者必须一致;
+  // 加载时 --fit 会按当时实际空闲自适应
+  const vram = systemInfo.totalVRAM ?? systemInfo.availableVRAM ?? 0;
   const paramCount = repo.parameterCount || 7; // 默认 7B
   
   // 对于 MoE 模型，使用激活参数来估算 KV Cache
@@ -204,7 +218,7 @@ export function analyzeQuantizations(
     const bitsPerWeight = BITS_PER_WEIGHT[quant] || 4.5;
     
     // 对于 MoE，总参数量用于模型大小，激活参数用于 KV Cache
-    const modelSize = estimateModelSize(paramCount, bitsPerWeight);
+    const modelSize = estimateModelSize(repo, quant, paramCount, bitsPerWeight);
     const kvCacheSize = estimateKVCacheSize(kvParamCount, desiredContext);
     const totalVRAM = modelSize + kvCacheSize + visionSize;
     
@@ -257,7 +271,8 @@ export function analyzeQuantizations(
  */
 export function getRecommendedContext(
   estimate: QuantizationEstimate,
-  systemInfo: SystemInfo
+  // 保留参数以与 getRecommendedGpuLayers 签名一致,当前逻辑未用到
+  _systemInfo: SystemInfo
 ): number {
   // 如果能装下，使用默认值
   if (estimate.fits) {
@@ -281,8 +296,8 @@ export function getRecommendedGpuLayers(
   }
   
   // 计算能装多少层
-  // 简化估算：假设模型有 32 层，按比例计算
-  const vram = systemInfo.totalVRAM || 0;
+  // 简化估算：假设模型有 32 层，按比例计算;基准同为物理总显存(见 analyzeQuantizations)
+  const vram = systemInfo.totalVRAM ?? systemInfo.availableVRAM ?? 0;
   const overhead = 500 * 1024 * 1024;
   const availableForModel = vram - estimate.visionSize - estimate.kvCacheSize - overhead;
   
@@ -291,7 +306,7 @@ export function getRecommendedGpuLayers(
   const ratio = availableForModel / estimate.modelSize;
   const estimatedLayers = Math.floor(32 * ratio);
   
-  return Math.max(10, Math.min(estimatedLayers, 99));
+  return Math.max(0, Math.min(estimatedLayers, 99));
 }
 
 /**

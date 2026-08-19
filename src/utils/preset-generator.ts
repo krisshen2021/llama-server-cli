@@ -3,9 +3,8 @@
  * 根据下载的模型和系统配置自动生成预设
  */
 
-import os from 'os';
 import { Preset } from '../types.js';
-import { HFRepo, HFFile } from './hf-api.js';
+import { HFRepo, assertValidModelId } from './hf-api.js';
 import { SystemInfo, QuantizationEstimate, getRecommendedContext, getRecommendedGpuLayers } from './model-recommender.js';
 import { loadPresets, savePreset } from './preset-manager.js';
 
@@ -244,6 +243,11 @@ export function getModelStoragePath(
   modelId: string,
   filename: string
 ): string {
+  assertValidModelId(modelId);
+  // filename 来自远端文件树，防止路径穿越
+  if (filename.includes('..') || filename.startsWith('/')) {
+    throw new Error(`Invalid filename: ${filename}`);
+  }
   // modelId 格式：organization/repo-name
   // 存储路径：modelsDir/organization/repo-name/filename
   const normalizedDir = normalizePath(modelsDir);
@@ -258,6 +262,7 @@ export function getModelStoragePath(
  * 获取模型目录
  */
 export function getModelDir(modelsDir: string, modelId: string): string {
+  assertValidModelId(modelId);
   const normalizedDir = normalizePath(modelsDir);
   const parts = modelId.split('/');
   const org = parts[0];

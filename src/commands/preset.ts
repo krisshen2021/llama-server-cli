@@ -3,12 +3,13 @@ import inquirer from 'inquirer';
 import chalk from 'chalk';
 import { Preset } from '../types.js';
 import { scanModels } from '../utils/model-scanner.js';
+import { getExpandedConfig } from '../utils/config-manager.js';
+import { parseIntOpt } from '../utils/server-options.js';
 import { 
   loadPresets, 
   savePreset, 
   deletePreset, 
-  getPreset, 
-  listPresetNames 
+  getPreset 
 } from '../utils/preset-manager.js';
 
 export function createPresetCommand(): Command {
@@ -139,6 +140,7 @@ export function createPresetCommand(): Command {
 async function runPresetSave(name: string): Promise<void> {
   const existing = getPreset(name);
   const models = scanModels();
+  const config = getExpandedConfig();
   
   if (models.length === 0) {
     throw new Error('No models found. Configure models directory first.');
@@ -166,16 +168,16 @@ async function runPresetSave(name: string): Promise<void> {
     {
       type: 'input',
       name: 'ctxSize',
-      message: 'Context size:',
-      default: existing?.ctxSize ?? 4096,
-      filter: (val) => parseInt(val) || 4096,
+      message: 'Context size (number or "auto"):',
+      default: existing?.ctxSize ?? config.defaultCtxSize,
+      filter: (val) => val === 'auto' ? 'auto' : parseIntOpt(String(val)),
     },
     {
       type: 'input',
       name: 'gpuLayers',
       message: 'GPU layers (number or "auto"):',
-      default: existing?.gpuLayers ?? 'auto',
-      filter: (val) => val === 'auto' ? 'auto' : (parseInt(val) || 'auto'),
+      default: existing?.gpuLayers ?? config.defaultGpuLayers,
+      filter: (val) => val === 'auto' ? 'auto' : parseIntOpt(String(val)),
     },
     {
       type: 'input',
@@ -242,14 +244,14 @@ async function runPresetSave(name: string): Promise<void> {
       type: 'input',
       name: 'host',
       message: 'Host:',
-      default: existing?.host ?? '0.0.0.0',
+      default: existing?.host ?? config.defaultHost,
     },
     {
       type: 'input',
       name: 'port',
       message: 'Port:',
-      default: existing?.port ?? 8080,
-      filter: (val) => parseInt(val) || 8080,
+      default: existing?.port ?? config.defaultPort,
+      filter: (val) => parseIntOpt(String(val)),
     },
     {
       type: 'confirm',
@@ -279,6 +281,25 @@ async function runPresetSave(name: string): Promise<void> {
         return -1;
       },
     },
+    {
+      type: 'list',
+      name: 'specType',
+      message: 'Speculative decoding type:',
+      choices: [
+        { name: 'Off', value: '' },
+        { name: 'draft-simple', value: 'draft-simple' },
+        { name: 'draft-eagle3', value: 'draft-eagle3' },
+        { name: 'draft-mtp', value: 'draft-mtp' },
+        { name: 'draft-dflash', value: 'draft-dflash' },
+        { name: 'draft-dspark', value: 'draft-dspark' },
+        { name: 'ngram-simple', value: 'ngram-simple' },
+        { name: 'ngram-map-k', value: 'ngram-map-k' },
+        { name: 'ngram-map-k4v', value: 'ngram-map-k4v' },
+        { name: 'ngram-mod', value: 'ngram-mod' },
+        { name: 'ngram-cache', value: 'ngram-cache' },
+      ],
+      default: existing?.specType ?? '',
+    },
   ]);
   
   const preset: Preset = {
@@ -298,6 +319,12 @@ async function runPresetSave(name: string): Promise<void> {
     jinja: answers.jinja,
     flashAttn: answers.flashAttn,
     reasoningBudget: answers.reasoningBudget,
+    specType: answers.specType || undefined, // '' (Off) 不写入预设,与 TUI 编辑器一致
+    // 交互流程没有 specModel 问题,但已手工配置的值(非 mtp- 命名 draft 模块的覆盖通道)
+    // 必须原样保留,不能因逐字段重建而丢失(同 TUI 编辑器)
+    specModel: existing?.specModel,
+    // slotSavePath 同理:交互流程不提供该字段,已配置的值(TUI 开关或手工设置)原样保留
+    slotSavePath: existing?.slotSavePath,
   };
   
   savePreset(preset);

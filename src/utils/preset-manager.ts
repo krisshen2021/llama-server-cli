@@ -1,27 +1,25 @@
-import { existsSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { Preset, PresetsStore } from '../types.js';
-import { CONFIG_DIR } from './config-manager.js';
+import { getConfigDir } from './config-manager.js';
+import { readJsonSafe, writeJsonAtomic } from './json-file.js';
 
-const PRESETS_FILE = join(CONFIG_DIR, 'presets.json');
-
-// 加载所有预设
-export function loadPresets(): PresetsStore {
-  if (!existsSync(PRESETS_FILE)) {
-    return {};
-  }
-  
-  try {
-    const content = readFileSync(PRESETS_FILE, 'utf-8');
-    return JSON.parse(content) as PresetsStore;
-  } catch {
-    return {};
-  }
+export function getPresetsPath(): string {
+  return join(getConfigDir(), 'presets.json');
 }
 
-// 保存所有预设
+// 加载所有预设(损坏时 readJsonSafe 备份 .bak 并返回 {})
+export function loadPresets(): PresetsStore {
+  return readJsonSafe<PresetsStore>(getPresetsPath(), {});
+}
+
+// 保存所有预设(原子写)
 export function savePresets(presets: PresetsStore): void {
-  writeFileSync(PRESETS_FILE, JSON.stringify(presets, null, 2));
+  const dir = getConfigDir();
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
+  }
+  writeJsonAtomic(getPresetsPath(), presets);
 }
 
 // 获取单个预设
@@ -57,14 +55,19 @@ export function deletePreset(name: string): boolean {
   return true;
 }
 
-// 列出所有预设名称
-export function listPresetNames(): string[] {
-  const presets = loadPresets();
-  return Object.keys(presets);
-}
-
 // 检查预设是否存在
 export function presetExists(name: string): boolean {
   const presets = loadPresets();
   return name in presets;
+}
+
+// 重命名预设:新旧任一校验失败都返回 false 且不落盘(调用方负责提示)
+export function renamePreset(oldName: string, newName: string): boolean {
+  const presets = loadPresets();
+  if (!presets[oldName]) return false;
+  if (oldName === newName || presets[newName]) return false; // 同名/新名被占,不覆盖
+  presets[newName] = presets[oldName];
+  delete presets[oldName];
+  savePresets(presets);
+  return true;
 }

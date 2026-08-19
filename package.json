@@ -10,7 +10,8 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc -w",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "test": "vitest run"
   },
   "keywords": [
     "llama",
@@ -32,6 +33,7 @@
     "@types/blessed": "^0.1.27",
     "@types/inquirer": "^9.0.7",
     "@types/node": "^20.11.0",
-    "typescript": "^5.3.3"
+    "typescript": "^5.3.3",
+    "vitest": "^4.1.10"
   }
 }

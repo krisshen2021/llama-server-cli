@@ -11,6 +11,9 @@ export interface Config {
   defaultCachePrompt: boolean;
   defaultCacheReuse: number; // 0 = disabled
   hfToken?: string;  // HuggingFace API Token (for private repos)
+  // 下载后端:auto=有 aria2c 用 aria2 否则内置;aria2=强制 aria2(未安装则回退内置);
+  // builtin=强制内置。配置 hfToken 时总是回退内置(aria2 会把 token 透传到重定向域名)
+  downloadBackend?: 'auto' | 'aria2' | 'builtin';
 }
 
 // 服务器启动选项
@@ -18,7 +21,7 @@ export interface ServerOptions {
   model: string;
   mmproj?: string;
   useVision?: boolean;
-  ctxSize: number;
+  ctxSize: number | 'auto'; // 'auto':不传 -c,由 --fit 按空闲显存自动选择
   gpuLayers: number | 'auto';
   tensorSplit?: string; // e.g. "1,1" or "3,1"
   fit?: boolean;
@@ -35,6 +38,9 @@ export interface ServerOptions {
   cachePrompt?: boolean;
   cacheReuse?: number;
   logRequests?: boolean; // 是否启用请求日志代理
+  specType?: string;  // 投机解码类型(--spec-type,如 draft-mtp)
+  specModel?: string; // draft/MTP 模块路径(--model-draft)
+  slotSavePath?: string; // 会话 KV 持久化目录(--slot-save-path);undefined = 禁用
 }
 
 // 预设配置
@@ -43,7 +49,7 @@ export interface Preset {
   model: string;
   mmproj?: string;
   useVision?: boolean;
-  ctxSize: number;
+  ctxSize: number | 'auto'; // 'auto':不传 -c,由 --fit 按空闲显存自动选择
   gpuLayers: number | 'auto';
   tensorSplit?: string;
   fit?: boolean;
@@ -58,6 +64,9 @@ export interface Preset {
   batchSize?: number;
   cachePrompt?: boolean;
   cacheReuse?: number;
+  specType?: string;  // 投机解码类型(--spec-type,如 draft-mtp)
+  specModel?: string; // draft/MTP 模块路径(--model-draft)
+  slotSavePath?: string; // 会话 KV 持久化目录(--slot-save-path);undefined = 禁用
 }
 
 // 预设存储
@@ -73,6 +82,7 @@ export interface ModelInfo {
   sizeHuman: string;
   mmproj?: string;
   mmprojSize?: number;
+  mtp?: string; // 配对的 MTP 模块路径(投机解码用,同目录 mtp-*.gguf)
 }
 
 // 服务器状态
@@ -82,6 +92,8 @@ export interface ServerStatus {
   model?: string;
   port?: number;
   startTime?: Date;
+  proxy?: boolean;      // 是否经请求日志代理启动(来自 PID 文件)
+  publicPort?: number;  // 代理对外端口(有代理时)
 }
 
 // PID 文件内容
@@ -90,6 +102,8 @@ export interface PidFile {
   model: string;
   port: number;
   startTime: string;
+  proxy?: boolean;      // 是否经请求日志代理启动
+  publicPort?: number;  // 代理对外端口(有代理时)
 }
 
 // 默认配置
@@ -104,18 +118,5 @@ export const DEFAULT_CONFIG: Config = {
   defaultThreadsBatch: 0,
   defaultCachePrompt: true,
   defaultCacheReuse: 0,
-};
-
-// 默认服务器选项
-export const DEFAULT_SERVER_OPTIONS: Partial<ServerOptions> = {
-  ctxSize: 4096,
-  gpuLayers: 'auto',
-  host: '0.0.0.0',
-  port: 8080,
-  jinja: true,
-  flashAttn: 'auto',
-  reasoningBudget: -1,
-  cachePrompt: true,
-  cacheReuse: 0,
-  batchSize: 2048,
+  downloadBackend: 'auto',
 };

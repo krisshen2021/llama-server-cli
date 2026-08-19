@@ -2,6 +2,8 @@ import { Command } from 'commander';
 import chalk from 'chalk';
 import { basename } from 'path';
 import { getServerStatus, getLogFile, readLastLogs } from '../utils/process-manager.js';
+import { parseIntOpt } from '../utils/server-options.js';
+import { formatUptime } from '../utils/format.js';
 
 export function createStatusCommand(): Command {
   const cmd = new Command('status');
@@ -21,7 +23,7 @@ export function createStatusCommand(): Command {
   return cmd;
 }
 
-async function runStatus(options: { logs?: string }): Promise<void> {
+async function runStatus(options: { logs?: string | boolean }): Promise<void> {
   const status = getServerStatus();
   
   console.log();
@@ -35,22 +37,25 @@ async function runStatus(options: { logs?: string }): Promise<void> {
     return;
   }
   
+  // 经代理启动时对外服务端口是代理端口;只展示内部端口会引导调用方绕过代理(请求日志窗口收不到流量)
+  const viaProxy = status.proxy === true && typeof status.publicPort === 'number';
   console.log(chalk.yellow('  Status:  ') + chalk.green('Running'));
   console.log(chalk.yellow('  PID:     ') + chalk.white(status.pid));
   console.log(chalk.yellow('  Model:   ') + chalk.white(basename(status.model || '')));
-  console.log(chalk.yellow('  Port:    ') + chalk.white(status.port));
+  console.log(chalk.yellow('  Port:    ') + chalk.white(viaProxy ? `${status.publicPort} (proxy → ${status.port} internal)` : status.port));
   
   if (status.startTime) {
     const uptime = formatUptime(Date.now() - status.startTime.getTime());
     console.log(chalk.yellow('  Uptime:  ') + chalk.white(uptime));
   }
   
-  console.log(chalk.yellow('  URL:     ') + chalk.blue(`http://localhost:${status.port}`));
+  console.log(chalk.yellow('  URL:     ') + chalk.blue(`http://localhost:${viaProxy ? status.publicPort : status.port}`));
   console.log(chalk.yellow('  Logs:    ') + chalk.gray(getLogFile()));
   
   // 显示日志
   if (options.logs) {
-    const lines = parseInt(options.logs) || 20;
+    // --logs 不带值时 commander 给 true,回退默认 20 行
+    const lines = options.logs === true ? 20 : parseIntOpt(options.logs);
     const logs = readLastLogs(lines);
     
     if (logs) {
@@ -63,21 +68,4 @@ async function runStatus(options: { logs?: string }): Promise<void> {
   
   console.log();
   console.log(chalk.gray(`Use ${chalk.white('lsc stop')} to stop the server`));
-}
-
-function formatUptime(ms: number): string {
-  const seconds = Math.floor(ms / 1000);
-  const minutes = Math.floor(seconds / 60);
-  const hours = Math.floor(minutes / 60);
-  const days = Math.floor(hours / 24);
-  
-  if (days > 0) {
-    return `${days}d ${hours % 24}h ${minutes % 60}m`;
-  } else if (hours > 0) {
-    return `${hours}h ${minutes % 60}m ${seconds % 60}s`;
-  } else if (minutes > 0) {
-    return `${minutes}m ${seconds % 60}s`;
-  } else {
-    return `${seconds}s`;
-  }
 }

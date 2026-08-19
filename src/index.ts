@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { Command } from 'commander';
-import chalk from 'chalk';
+import { readFileSync } from 'fs';
 import { createStartCommand } from './commands/start.js';
 import { createStopCommand } from './commands/stop.js';
 import { createStatusCommand } from './commands/status.js';
@@ -13,10 +13,21 @@ import { createTUI } from './tui/index.js';
 
 const program = new Command();
 
+// 版本号运行时从 package.json 读取(dist/index.js 的 ../package.json 即项目根)
+// 读取失败(文件缺失/JSON 损坏)时回退硬编码版本,避免 CLI 在 commander 启动前崩溃
+// 注意:回退值需与 package.json 的 version 保持同步
+let pkgVersion = '1.0.0';
+try {
+  const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string };
+  pkgVersion = pkg.version;
+} catch {
+  // 忽略,使用回退版本
+}
+
 program
   .name('lsc')
   .description('CLI tool for managing llama.cpp server')
-  .version('1.0.0');
+  .version(pkgVersion);
 
 // 注册子命令
 program.addCommand(createStartCommand());

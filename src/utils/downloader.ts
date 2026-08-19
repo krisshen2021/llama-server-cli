@@ -5,10 +5,11 @@
 
 import https from 'https';
 import http from 'http';
-import { createWriteStream, existsSync, statSync, renameSync, unlinkSync, mkdirSync } from 'fs';
-import { dirname, join } from 'path';
+import { createWriteStream, existsSync, statSync, renameSync, unlinkSync, mkdirSync, type WriteStream } from 'fs';
+import { dirname } from 'path';
 import { EventEmitter } from 'events';
 import { loadConfig } from './config-manager.js';
+import { isTrustedHost } from './http.js';
 import { DownloadMeta, getMetaPathForFile, writeDownloadMeta, deleteDownloadMeta, updateMetaTimestamp } from './download-meta.js';
 
 // 下载任务状态
@@ -39,6 +40,8 @@ export interface DownloadTask {
   startTime?: number;
   lastUpdate?: number;
   lastBytes?: number;
+  retries?: number;       // 已经历的重试次数(跨队列调度保留)
+  lastMetaWrite?: number; // 上次写元数据时间戳的时间(节流用)
 }
 
 // 下载进度事件
@@ -52,12 +55,50 @@ export interface DownloadProgress {
   total: number;
 }
 
+// 内置/aria2 两种下载后端的公共接口,TUI 只依赖这个形状
+export interface DownloadManagerLike {
+  addTask(task: Omit<DownloadTask, 'id' | 'downloadedBytes' | 'status' | 'speed' | 'eta'>): string;
+  start(): Promise<void>;
+  pause(): void;
+  resume(): Promise<void>;
+  cancel(): void;
+  cancelTasks(taskIds: string[]): void;
+  getTasks(): DownloadTask[];
+  on(event: 'progress', listener: (progress: DownloadProgress) => void): unknown;
+  off(event: 'progress', listener: (progress: DownloadProgress) => void): unknown;
+}
+
 // 下载管理器选项
 export interface DownloadManagerOptions {
   maxConcurrent?: number;     // 最大并发数，默认 3
   retryCount?: number;        // 重试次数，默认 3
   retryDelay?: number;        // 重试延迟 ms，默认 1000
   chunkSize?: number;         // 块大小，默认 1MB
+}
+
+// 最大重定向次数
+const MAX_REDIRECTS = 5;
+
+// 续传决策结果
+export type ResumePlan =
+  | { action: 'download'; offset: number; flags: 'a' | 'w' }
+  | { action: 'complete' }
+  | { action: 'restart' }; // 删除 partial 后从头再试(消耗一次重试)
+
+// 续传决策:offset 只信磁盘上的 partial 实际大小
+export function planResume(partialSize: number, statusCode: number, expectedSize?: number): ResumePlan {
+  if (statusCode === 416) {
+    return expectedSize !== undefined && partialSize === expectedSize
+      ? { action: 'complete' }
+      : { action: 'restart' };
+  }
+  if (expectedSize !== undefined && partialSize >= expectedSize) {
+    return { action: 'restart' };
+  }
+  if (partialSize > 0 && statusCode === 206) {
+    return { action: 'download', offset: partialSize, flags: 'a' };
+  }
+  return { action: 'download', offset: 0, flags: 'w' };
 }
 
 // 获取 HF Token
@@ -85,6 +126,7 @@ export class DownloadManager extends EventEmitter {
   private options: Required<DownloadManagerOptions>;
   private isPaused: boolean = false;
   private isCancelled: boolean = false;
+  private queueRunning: boolean = false;
   private pausePromise: Promise<void> | null = null;
   private pauseResolver: (() => void) | null = null;
   private progressInterval?: NodeJS.Timeout;
@@ -175,6 +217,13 @@ export class DownloadManager extends EventEmitter {
       const task = this.tasks.get(id);
       if (task) {
         task.status = 'paused';
+        // 暂停时强制写一次元数据时间戳(绕过节流)
+        if (task.meta) {
+          try {
+            updateMetaTimestamp(getMetaPathForFile(task.destPath));
+          } catch {}
+          task.lastMetaWrite = Date.now();
+        }
       }
     }
     this.activeDownloads.clear();
@@ -247,6 +296,21 @@ export class DownloadManager extends EventEmitter {
    * 处理下载队列
    */
   private async processQueue(): Promise<void> {
+    // 暂停中不调度新下载(重试定时器到点也会调这里,暂停时直接返回)
+    // 重入守卫:任何时候最多只有一个队列循环,避免每个重试定时器都叠加一个轮询循环
+    if (this.isPaused || this.queueRunning) return;
+    this.queueRunning = true;
+    try {
+      await this.runQueue();
+    } finally {
+      this.queueRunning = false;
+    }
+  }
+
+  /**
+   * 队列主循环:直到所有任务结束(或取消)才返回
+   */
+  private async runQueue(): Promise<void> {
     while (true) {
       if (this.isCancelled) {
         this.stopProgressUpdates();
@@ -264,20 +328,24 @@ export class DownloadManager extends EventEmitter {
       const pendingTasks = Array.from(this.tasks.values())
         .filter(t => t.status === 'pending');
       
+      // 仍有 downloading 状态的任务(可能在重试等待中),不算完成
+      const hasDownloading = Array.from(this.tasks.values())
+        .some(t => t.status === 'downloading');
+      
       // 计算可以启动多少个新下载
       const availableSlots = this.options.maxConcurrent - this.activeDownloads.size;
       
-      if (pendingTasks.length === 0 && this.activeDownloads.size === 0) {
+      if (pendingTasks.length === 0 && !hasDownloading && this.activeDownloads.size === 0) {
         // 所有任务完成
         this.stopProgressUpdates();
         this.emit('complete', this.getTasks());
         return;
       }
       
-      // 启动新下载
+      // 启动新下载(重试次数随任务保留,避免无限重试)
       const tasksToStart = pendingTasks.slice(0, availableSlots);
       for (const task of tasksToStart) {
-        this.startDownload(task);
+        this.startDownload(task, task.retries ?? 0);
       }
       
       // 等待一小段时间再检查
@@ -288,11 +356,10 @@ export class DownloadManager extends EventEmitter {
   /**
    * 启动单个下载
    */
-  private startDownload(task: DownloadTask, retryCount: number = 0): void {
+  private startDownload(task: DownloadTask, retryCount: number = 0, redirectCount: number = 0): void {
     task.status = 'downloading';
     task.startTime = Date.now();
     task.lastUpdate = Date.now();
-    task.lastBytes = task.downloadedBytes;
 
     // 写入/更新元数据
     if (task.meta) {
@@ -310,82 +377,147 @@ export class DownloadManager extends EventEmitter {
     
     const partialPath = task.destPath + '.partial';
     
+    // 续传 offset 只信磁盘上的 partial 实际大小,不信内存计数
+    let partialSize = existsSync(partialPath) ? statSync(partialPath).size : 0;
+    // aria2 多连接下载的 partial 可能带空洞(.aria2 控制文件存在为证),
+    // 内置下载器按顺序追加会错位,作废重下
+    const aria2ControlPath = partialPath + '.aria2';
+    if (partialSize > 0 && existsSync(aria2ControlPath)) {
+      try { unlinkSync(partialPath); } catch {}
+      try { unlinkSync(aria2ControlPath); } catch {}
+      partialSize = 0;
+    }
+    task.downloadedBytes = partialSize;
+    task.lastBytes = partialSize;
+    
+    const urlObj = new URL(task.url);
+    
     // 构建请求头
     const headers: Record<string, string> = {
       'User-Agent': 'lsc/1.0',
     };
     
     // 断点续传
-    if (task.downloadedBytes > 0) {
-      headers['Range'] = `bytes=${task.downloadedBytes}-`;
+    if (partialSize > 0) {
+      headers['Range'] = `bytes=${partialSize}-`;
     }
     
-    // HF Token
+    // HF Token 只发给可信主机,避免重定向把 token 带到第三方
     const token = getHFToken();
-    if (token) {
+    if (token && isTrustedHost(urlObj.hostname)) {
       headers['Authorization'] = `Bearer ${token}`;
     }
     
-    const urlObj = new URL(task.url);
     const isHttps = urlObj.protocol === 'https:';
     const httpModule = isHttps ? https : http;
     
     const options = {
       hostname: urlObj.hostname,
+      port: urlObj.port || (isHttps ? 443 : 80),
       path: urlObj.pathname + urlObj.search,
       method: 'GET',
       headers,
     };
     
+    // writeStream 在响应回调里创建,abort 时一并销毁,避免 fd 泄漏
+    let writeStream: WriteStream | null = null;
+    // 本次尝试是否已终结:req/res 可能都发 error,abort 后 res 也会发 error("aborted"),
+    // 用闭包标志保证每次尝试最多进一次错误/完成路径,避免重复调度重试
+    let attemptSettled = false;
+    
     const req = httpModule.request(options, (res) => {
       // 处理重定向
-      if (res.statusCode === 301 || res.statusCode === 302 || res.statusCode === 307) {
+      if (res.statusCode === 301 || res.statusCode === 302 || res.statusCode === 307 || res.statusCode === 308) {
+        // 本次尝试到此为止
+        attemptSettled = true;
+        // 先消费响应体释放 socket,再 follow
+        res.resume();
+        this.activeDownloads.delete(task.id);
         const redirectUrl = res.headers.location;
-        if (redirectUrl) {
-          task.url = redirectUrl;
-          this.activeDownloads.delete(task.id);
-          this.startDownload(task, retryCount);
-          return;
+        if (redirectUrl && redirectCount < MAX_REDIRECTS) {
+          // Location 可能是相对路径,基于当前 URL 解析;畸形 Location 走错误路径而非崩溃
+          let nextUrl: string;
+          try {
+            nextUrl = new URL(redirectUrl, task.url).toString();
+          } catch {
+            this.handleDownloadError(task, new Error('Invalid redirect location'), retryCount);
+            return;
+          }
+          task.url = nextUrl;
+          this.startDownload(task, retryCount, redirectCount + 1);
+        } else {
+          this.handleDownloadError(
+            task,
+            new Error(redirectUrl ? 'Too many redirects' : `HTTP ${res.statusCode}`),
+            retryCount,
+          );
         }
+        return;
+      }
+      
+      // 续传决策:416 / 超大 partial / 服务器忽略 Range 都在这里分流
+      const plan = planResume(partialSize, res.statusCode ?? 0, task.expectedSize);
+      
+      if (plan.action === 'complete') {
+        // 416 且本地已达期望大小:partial 已是完整文件,直接走完成路径
+        attemptSettled = true;
+        res.resume();
+        this.activeDownloads.delete(task.id);
+        this.finalizeDownload(task, partialPath, retryCount);
+        return;
+      }
+      
+      if (plan.action === 'restart') {
+        // partial 损坏/超大/与期望不符:删除后消耗一次重试从头再来
+        attemptSettled = true;
+        res.resume();
+        this.activeDownloads.delete(task.id);
+        try {
+          unlinkSync(partialPath);
+        } catch {}
+        task.downloadedBytes = 0;
+        this.handleDownloadError(task, new Error('Stale partial file, restarting download'), retryCount);
+        return;
       }
       
       // 检查状态码
       if (res.statusCode !== 200 && res.statusCode !== 206) {
+        attemptSettled = true;
+        res.resume();
+        this.activeDownloads.delete(task.id);
         this.handleDownloadError(task, new Error(`HTTP ${res.statusCode}`), retryCount);
         return;
       }
       
-      // 创建写入流（追加模式用于断点续传）
-      const writeStream = createWriteStream(partialPath, {
-        flags: task.downloadedBytes > 0 ? 'a' : 'w',
-      });
+      task.downloadedBytes = plan.offset;
+      task.lastBytes = plan.offset;
+      
+      // 创建写入流(append 续传 / truncate 重下,由 planResume 决定)
+      writeStream = createWriteStream(partialPath, { flags: plan.flags });
       
       res.on('data', (chunk: Buffer) => {
         task.downloadedBytes += chunk.length;
       });
       
+      // 响应流中途出错(socket reset 等):进重试路径,避免未处理异常崩溃
+      res.on('error', (err) => {
+        if (attemptSettled) return;
+        attemptSettled = true;
+        this.activeDownloads.delete(task.id);
+        writeStream?.destroy();
+        this.handleDownloadError(task, err, retryCount);
+      });
+      
       res.pipe(writeStream);
       
       writeStream.on('finish', () => {
+        if (attemptSettled) return;
+        attemptSettled = true;
         this.activeDownloads.delete(task.id);
         
         // 检查是否下载完整
         if (task.downloadedBytes >= task.expectedSize) {
-          // 重命名文件
-          try {
-            if (existsSync(task.destPath)) {
-              unlinkSync(task.destPath);
-            }
-            renameSync(partialPath, task.destPath);
-            task.status = 'completed';
-            if (task.meta) {
-              const metaPath = getMetaPathForFile(task.destPath);
-              deleteDownloadMeta(metaPath);
-            }
-            this.emit('task-complete', task);
-          } catch (err) {
-            this.handleDownloadError(task, err as Error, retryCount);
-          }
+          this.finalizeDownload(task, partialPath, retryCount);
         } else {
           // 下载不完整，重试
           this.handleDownloadError(task, new Error('Incomplete download'), retryCount);
@@ -393,36 +525,75 @@ export class DownloadManager extends EventEmitter {
       });
       
       writeStream.on('error', (err) => {
+        if (attemptSettled) return;
+        attemptSettled = true;
         this.activeDownloads.delete(task.id);
+        // 同时销毁响应流,避免写流失败后(如 ENOSPC)socket 继续空拉剩余数据
+        res.destroy();
         this.handleDownloadError(task, err, retryCount);
       });
     });
     
     req.on('error', (err) => {
+      if (attemptSettled) return;
+      attemptSettled = true;
       this.activeDownloads.delete(task.id);
+      writeStream?.destroy();
       this.handleDownloadError(task, err, retryCount);
+    });
+    
+    // 空闲超时:连接停滞 60s 判定失败,进重试路径
+    req.setTimeout(60_000, () => {
+      req.destroy(new Error('Request timed out'));
     });
     
     // 保存请求引用以便取消
     this.activeDownloads.set(task.id, {
       req,
-      abort: () => req.destroy(),
+      abort: () => {
+        // 标记本次尝试已终结:abort 引发的 req/res 后续 error 不再进错误路径
+        attemptSettled = true;
+        req.destroy();
+        writeStream?.destroy();
+      },
     });
     
     req.end();
   }
   
   /**
+   * 下载完成:partial 转正、清理元数据、发完成事件
+   */
+  private finalizeDownload(task: DownloadTask, partialPath: string, retryCount: number): void {
+    try {
+      if (existsSync(task.destPath)) {
+        unlinkSync(task.destPath);
+      }
+      renameSync(partialPath, task.destPath);
+      task.status = 'completed';
+      if (task.meta) {
+        const metaPath = getMetaPathForFile(task.destPath);
+        deleteDownloadMeta(metaPath);
+      }
+      this.emit('task-complete', task);
+    } catch (err) {
+      this.handleDownloadError(task, err as Error, retryCount);
+    }
+  }
+  
+  /**
    * 处理下载错误
    */
   private handleDownloadError(task: DownloadTask, error: Error, retryCount: number): void {
-    if (retryCount < this.options.retryCount && !this.isPaused) {
-      // 重试
+    if (retryCount < this.options.retryCount) {
+      // 重试:到点无条件回到 pending 队列
+      // (暂停时 processQueue 直接返回,恢复后由主循环捞起;已取消则不再重试)
       setTimeout(() => {
-        if (!this.isPaused) {
-          task.status = 'pending';
-          this.startDownload(task, retryCount + 1);
-        }
+        // 已取消、或任务已不在 downloading(被暂停/取消/已完成/已有新尝试接管):不再重试
+        if (this.isCancelled || task.status !== 'downloading') return;
+        task.retries = retryCount + 1;
+        task.status = 'pending';
+        this.processQueue();
       }, this.options.retryDelay);
     } else {
       // 失败
@@ -478,10 +649,13 @@ export class DownloadManager extends EventEmitter {
         task.lastUpdate = now;
         task.lastBytes = task.downloadedBytes;
 
-        // 更新元数据时间戳
-        if (task.meta) {
+        // 更新元数据时间戳(节流:距上次写入 < 10s 则跳过;完成/暂停时强制写)
+        if (task.meta && (task.lastMetaWrite === undefined || now - task.lastMetaWrite >= 10_000)) {
           const metaPath = getMetaPathForFile(task.destPath);
-          updateMetaTimestamp(metaPath);
+          try {
+            updateMetaTimestamp(metaPath);
+          } catch {}
+          task.lastMetaWrite = now;
         }
       }
     }
@@ -523,35 +697,6 @@ export class DownloadManager extends EventEmitter {
 }
 
 /**
- * 格式化速度
- */
-export function formatSpeed(bytesPerSec: number): string {
-  if (bytesPerSec < 1024) return bytesPerSec.toFixed(0) + ' B/s';
-  if (bytesPerSec < 1024 * 1024) return (bytesPerSec / 1024).toFixed(1) + ' KB/s';
-  if (bytesPerSec < 1024 * 1024 * 1024) return (bytesPerSec / (1024 * 1024)).toFixed(1) + ' MB/s';
-  return (bytesPerSec / (1024 * 1024 * 1024)).toFixed(2) + ' GB/s';
-}
-
-/**
- * 格式化 ETA
- */
-export function formatEta(seconds: number): string {
-  if (seconds < 0 || !isFinite(seconds)) return '--:--';
-  
-  const hours = Math.floor(seconds / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  const secs = Math.floor(seconds % 60);
-  
-  if (hours > 0) {
-    return `${hours}h ${minutes}m`;
-  } else if (minutes > 0) {
-    return `${minutes}m ${secs}s`;
-  } else {
-    return `${secs}s`;
-  }
-}
-
-/**
  * 检查磁盘空间
  */
 export async function checkDiskSpace(path: string, requiredBytes: number): Promise<{
@@ -560,7 +705,7 @@ export async function checkDiskSpace(path: string, requiredBytes: number): Promi
   required: number;
 }> {
   try {
-    const { execSync } = await import('child_process');
+    const { execFileSync } = await import('child_process');
     const dir = dirname(path);
     
     // 确保目录存在
@@ -568,11 +713,16 @@ export async function checkDiskSpace(path: string, requiredBytes: number): Promi
       mkdirSync(dir, { recursive: true });
     }
     
-    // 获取可用空间
-    const output = execSync(`df -B1 "${dir}" | tail -1 | awk '{print $4}'`, {
-      encoding: 'utf-8',
-    });
-    const available = parseInt(output.trim(), 10);
+    // 获取可用空间 (无 shell 调用，防止注入; -- 防止 dir 被解析为选项)
+    const output = execFileSync('df', ['-B1', '--', dir], { encoding: 'utf-8' });
+    // 取最后一行数据行，第 4 列为 Available
+    const lines = output.trim().split('\n');
+    const lastLine = lines[lines.length - 1];
+    const available = parseInt(lastLine.trim().split(/\s+/)[3], 10);
+    // 输出异常时走下方兜底 (视为空间充足)
+    if (Number.isNaN(available)) {
+      throw new Error(`unexpected df output: ${output}`);
+    }
     
     return {
       ok: available >= requiredBytes,

@@ -28,28 +28,6 @@ function truncate(str: string, maxLen: number): string {
   return str.slice(0, maxLen) + chalk.gray(`\n... (${str.length - maxLen} more chars)`);
 }
 
-function formatJson(str: string, indent = 2): string {
-  try {
-    const obj = JSON.parse(str);
-    // 对于 messages 数组，特殊处理以便更好地显示
-    if (obj.messages && Array.isArray(obj.messages)) {
-      const summary = {
-        ...obj,
-        messages: obj.messages.map((m: any) => ({
-          role: m.role,
-          content: typeof m.content === 'string' 
-            ? (m.content.length > 200 ? m.content.slice(0, 200) + '...' : m.content)
-            : m.content,
-        })),
-      };
-      return JSON.stringify(summary, null, indent);
-    }
-    return JSON.stringify(obj, null, indent);
-  } catch {
-    return str;
-  }
-}
-
 function formatTimestamp(): string {
   const now = new Date();
   return chalk.gray(`[${now.toLocaleTimeString()}]`);
@@ -71,66 +49,98 @@ export function createRequestLogger(options: Partial<RequestLoggerOptions> = {})
   const server = http.createServer((req, res) => {
     const reqId = ++requestCount;
     const startTime = Date.now();
+    let clientGone = false;
+    let proxyReq: http.ClientRequest | undefined;
 
-    let requestBody = '';
+    // 客户端连接断开：标记并终止上游请求（如 llama-server 正在生成），避免无效工作
+    res.on('close', () => {
+      if (!res.writableEnded) {
+        clientGone = true;
+        proxyReq?.destroy();
+      }
+    });
+    res.on('error', (err) => {
+      log(`Client connection error: ${err.message}`, 'error');
+    });
 
-    req.on('data', (chunk) => {
-      requestBody += chunk.toString();
+    // 以 Buffer 数组收集请求体：多字节 UTF-8 字符可能跨 TCP chunk，
+    // 逐 chunk toString 会把字符拆成 U+FFFD，破坏转发内容的字节一致性
+    const chunks: Buffer[] = [];
+
+    req.on('data', (chunk: Buffer) => {
+      chunks.push(chunk);
     });
 
     req.on('end', () => {
+      if (clientGone || res.destroyed) return; // 客户端已断开，不再转发
+
+      const body = Buffer.concat(chunks);
+      chunks.length = 0; // 释放 chunk 引用，长响应期间不再占用内存
+
       // 构建请求日志
       const lines: string[] = [];
       lines.push(`═══ REQUEST #${reqId} ═══`);
       lines.push(`${formatTimestamp()} ${req.method} ${req.url}`);
 
-      // 解析请求体摘要
-      if (opts.showBody && requestBody) {
+      // 解析请求体摘要（完整解码仅存在于本帧内，不进入任何闭包）
+      if (opts.showBody && body.length > 0) {
+        const bodyStr = body.toString('utf8');
         try {
-          const body = JSON.parse(requestBody);
-          if (body.model) lines.push(`  model: ${body.model}`);
-          if (body.max_tokens) lines.push(`  max_tokens: ${body.max_tokens}`);
-          if (body.temperature !== undefined) lines.push(`  temperature: ${body.temperature}`);
-          if (body.stream !== undefined) lines.push(`  stream: ${body.stream}`);
-          
-          if (body.messages && Array.isArray(body.messages)) {
-            lines.push(`  messages: (${body.messages.length} items)`);
-            body.messages.forEach((m: any, i: number) => {
+          const parsed = JSON.parse(bodyStr);
+          if (parsed.model) lines.push(`  model: ${parsed.model}`);
+          if (parsed.max_tokens) lines.push(`  max_tokens: ${parsed.max_tokens}`);
+          if (parsed.temperature !== undefined) lines.push(`  temperature: ${parsed.temperature}`);
+          if (parsed.stream !== undefined) lines.push(`  stream: ${parsed.stream}`);
+
+          if (parsed.messages && Array.isArray(parsed.messages)) {
+            lines.push(`  messages: (${parsed.messages.length} items)`);
+            parsed.messages.forEach((m: any, i: number) => {
               const content = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
               const preview = content.length > 80 ? content.slice(0, 80) + '...' : content;
               lines.push(`    [${i}] ${m.role}: ${preview.replace(/\n/g, '\\n')}`);
             });
           }
         } catch {
-          lines.push(`  body: ${truncate(requestBody, 200)}`);
+          // 非 JSON 请求体按 maxBodyLength 截断展示(CLI --max-body 可控)
+          lines.push(`  body: ${truncate(bodyStr, opts.maxBodyLength)}`);
         }
       }
 
       log(lines.join('\n'), 'request');
 
-      // 转发请求到 llama-server
-      const proxyReq = http.request(
+      // 转发请求到 llama-server：转发 Buffer 本体，content-length 按实际字节数设置
+      const headers: http.OutgoingHttpHeaders = {
+        ...req.headers,
+        host: `${opts.targetHost}:${opts.targetPort}`,
+      };
+      delete headers['transfer-encoding']; // body 已收全，改用显式 content-length
+      if (body.length > 0) {
+        headers['content-length'] = body.length;
+      } else {
+        delete headers['content-length'];
+      }
+
+      proxyReq = http.request(
         {
           hostname: opts.targetHost,
           port: opts.targetPort,
           path: req.url,
           method: req.method,
-          headers: {
-            ...req.headers,
-            host: `${opts.targetHost}:${opts.targetPort}`,
-          },
+          headers,
         },
         (proxyRes) => {
           const elapsed = Date.now() - startTime;
           const isStreaming = proxyRes.headers['content-type']?.includes('text/event-stream');
 
-          let responseBody = '';
+          // 仅在 showResponse 且非流式时收集响应体（仅展示用）；
+          // 流式响应只统计 chunk 数，收集的 body 永远不会被读取，不攒内存
+          const respChunks: Buffer[] = [];
           let tokenCount = 0;
 
-          proxyRes.on('data', (chunk) => {
-            responseBody += chunk.toString();
+          proxyRes.on('data', (chunk: Buffer) => {
+            if (opts.showResponse && !isStreaming) respChunks.push(chunk);
             res.write(chunk);
-            
+
             if (isStreaming) {
               const chunkLines = chunk.toString().split('\n');
               for (const line of chunkLines) {
@@ -157,7 +167,8 @@ export function createRequestLogger(options: Partial<RequestLoggerOptions> = {})
 
             if (isStreaming) {
               respLines.push(`  streaming, ~${tokenCount} chunks`);
-            } else {
+            } else if (opts.showResponse && respChunks.length > 0) {
+              const responseBody = Buffer.concat(respChunks).toString('utf8');
               try {
                 const resp = JSON.parse(responseBody);
                 if (resp.usage) {
@@ -168,10 +179,23 @@ export function createRequestLogger(options: Partial<RequestLoggerOptions> = {})
                   const preview = content.length > 80 ? content.slice(0, 80) + '...' : content;
                   respLines.push(`  content: ${preview.replace(/\n/g, '\\n')}`);
                 }
-              } catch {}
+              } catch {
+                // 非 JSON 响应体按 maxBodyLength 截断展示(CLI --max-body 可控)
+                respLines.push(`  body: ${truncate(responseBody, opts.maxBodyLength)}`);
+              }
             }
 
             log(respLines.join('\n'), 'response');
+          });
+
+          // 上游响应中途出错（如 llama-server 进程崩溃），销毁客户端连接，避免进程崩溃
+          proxyRes.on('error', (err) => {
+            if (clientGone) {
+              log(`─── RESPONSE #${reqId} aborted: client disconnected`, 'info');
+            } else {
+              log(`Upstream response error: ${err.message}`, 'error');
+            }
+            if (!res.writableEnded) res.destroy();
           });
 
           res.writeHead(proxyRes.statusCode || 500, proxyRes.headers);
@@ -179,13 +203,14 @@ export function createRequestLogger(options: Partial<RequestLoggerOptions> = {})
       );
 
       proxyReq.on('error', (err) => {
+        if (clientGone || res.destroyed) return; // 客户端已断开，只需静默清理
         log(`Proxy error: ${err.message}`, 'error');
-        res.writeHead(502);
-        res.end('Bad Gateway');
+        if (!res.headersSent) res.writeHead(502);
+        if (!res.writableEnded) res.end(`Proxy error: ${err.message}`);
       });
 
-      if (requestBody) {
-        proxyReq.write(requestBody);
+      if (body.length > 0) {
+        proxyReq.write(body);
       }
       proxyReq.end();
     });
@@ -205,7 +230,6 @@ export function startRequestLogger(options: Partial<RequestLoggerOptions> = {}):
       console.log();
       console.log(chalk.cyan('=== Request Logger Enabled ==='));
       console.log(chalk.gray(`  Proxy listening on port ${opts.listenPort}, forwarding to ${opts.targetPort}`));
-      console.log(chalk.gray(`  Set LSC_FULL_BODY=1 to see full request bodies`));
       console.log();
       resolve(server);
     });

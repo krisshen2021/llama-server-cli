@@ -3,8 +3,8 @@
  * 用于获取模型仓库信息和文件列表
  */
 
-import https from 'https';
 import { loadConfig } from './config-manager.js';
+import { httpRequestWithRedirects } from './http.js';
 
 // HuggingFace 文件信息
 export interface HFFile {
@@ -66,15 +66,31 @@ const QUANTIZATION_PATTERNS = [
   'FP16', 'FP32', 'BF16',
 ];
 
+// 按长度降序排序，确保长模式(如 Q4_K_M)优先于短模式(如 Q4_K)匹配
+const SORTED_PATTERNS = [...QUANTIZATION_PATTERNS].sort((a, b) => b.length - a.length);
+
 // 从文件名解析量化类型
 function parseQuantization(filename: string): string | undefined {
   const upper = filename.toUpperCase();
-  for (const q of QUANTIZATION_PATTERNS) {
-    if (upper.includes(q) || upper.includes(q.replace('_', '-'))) {
+  for (const q of SORTED_PATTERNS) {
+    if (upper.includes(q) || upper.includes(q.replaceAll('_', '-'))) {
       return q;
     }
   }
   return undefined;
+}
+
+// 校验模型 ID 格式 (org/repo)，防止注入与路径穿越
+export function assertValidModelId(modelId: string): void {
+  // 每段不得为全点号 (. .. ...)，否则形如 ../x 仍可路径穿越
+  if (!/^(?!\.+\/)[\w.-]+\/(?!\.+$)[\w.-]+$/.test(modelId)) {
+    throw new Error(`Invalid model ID: ${modelId} (expected "org/repo")`);
+  }
+}
+
+// 从文件名检测量化类型(无匹配返回 null)
+export function detectQuantization(fileName: string): string | null {
+  return parseQuantization(fileName) ?? null;
 }
 
 // 检测是否是视觉相关文件
@@ -172,61 +188,89 @@ function getHFToken(): string | undefined {
   }
 }
 
-// 发起 HTTPS 请求
-function httpsRequest(url: string, headers: Record<string, string> = {}): Promise<string> {
+// 响应体大小上限(防御异常/恶意的超大响应)
+const MAX_RESPONSE_BYTES = 50 * 1024 * 1024; // 50MB
+
+// 翻页上限(防御 Link 头 cursor 自指/异常导致的无限翻页)
+const MAX_TREE_PAGES = 100;
+
+// 发起 HTTPS 请求(统一走 http.ts:空闲超时、重定向上限、token 域名校阅)
+// 返回响应体与响应头(翻页需要读 Link 头)
+function httpsRequest(url: string): Promise<{ body: string; headers: import('http').IncomingHttpHeaders }> {
   return new Promise((resolve, reject) => {
-    const urlObj = new URL(url);
-    const options = {
-      hostname: urlObj.hostname,
-      path: urlObj.pathname + urlObj.search,
-      method: 'GET',
-      headers: {
-        'User-Agent': 'lsc/1.0',
-        ...headers,
+    const handle = httpRequestWithRedirects(
+      url,
+      {
+        headers: { 'User-Agent': 'lsc/1.0' },
+        token: getHFToken(),
       },
-    };
-    
-    const req = https.request(options, (res) => {
-      // 处理重定向
-      if (res.statusCode === 301 || res.statusCode === 302) {
-        const redirectUrl = res.headers.location;
-        if (redirectUrl) {
-          httpsRequest(redirectUrl, headers).then(resolve).catch(reject);
-          return;
-        }
-      }
-      
-      if (res.statusCode !== 200) {
-        reject(new Error(`HTTP ${res.statusCode}: ${res.statusMessage}`));
-        return;
-      }
-      
-      let data = '';
-      res.on('data', chunk => data += chunk);
-      res.on('end', () => resolve(data));
-    });
-    
-    req.on('error', reject);
-    req.end();
+      {
+        onResponse: (res) => {
+          if (res.statusCode !== 200) {
+            res.resume(); // 消费响应体,释放 socket
+            reject(new Error(`HTTP ${res.statusCode}: ${res.statusMessage}`));
+            return;
+          }
+
+          const chunks: Buffer[] = [];
+          let total = 0;
+          res.on('data', (chunk: Buffer) => {
+            total += chunk.length;
+            if (total > MAX_RESPONSE_BYTES) {
+              // 超上限:经句柄中止当前在途 hop,由 onError 收到 'Response too large'
+              handle.destroy(new Error('Response too large'));
+              return;
+            }
+            chunks.push(chunk);
+          });
+          res.on('end', () => resolve({ body: Buffer.concat(chunks).toString('utf-8'), headers: res.headers }));
+          res.on('error', reject);
+        },
+        onError: reject,
+      },
+    );
   });
+}
+
+// 解析 Link 头中 rel="next" 的 URL(HF tree 接口的 cursor 分页)
+function parseNextLink(linkHeader: string | undefined): string | undefined {
+  if (!linkHeader) return undefined;
+  for (const part of linkHeader.split(',')) {
+    const match = part.match(/<([^>]+)>\s*;\s*rel="next"/);
+    if (match) return match[1];
+  }
+  return undefined;
 }
 
 /**
  * 获取 HuggingFace 仓库的文件列表
  */
 export async function fetchRepoFiles(modelId: string): Promise<HFRepo> {
-  const token = getHFToken();
-  const headers: Record<string, string> = {};
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`;
-  }
-  
-  // 获取文件树
-  const treeUrl = `https://huggingface.co/api/models/${modelId}/tree/main`;
-  
+  assertValidModelId(modelId);
+
+  // 获取文件树:recursive=true 让子目录中的 GGUF 可见;按 Link 头 cursor 翻页取完
+  let nextUrl: string | undefined =
+    `https://huggingface.co/api/models/${modelId}/tree/main?recursive=true`;
+  const items: HFTreeItem[] = [];
+  // 翻页防御:cursor 重复(自指 Link)或页数超上限即终止
+  const seenUrls = new Set<string>();
+
   try {
-    const response = await httpsRequest(treeUrl, headers);
-    const items: HFTreeItem[] = JSON.parse(response);
+    while (nextUrl) {
+      if (seenUrls.has(nextUrl) || seenUrls.size >= MAX_TREE_PAGES) {
+        console.warn(
+          `Warning: tree pagination truncated for ${modelId} ` +
+          `(repeated cursor or over ${MAX_TREE_PAGES} pages); file list may be incomplete`,
+        );
+        break;
+      }
+      seenUrls.add(nextUrl);
+      const { body, headers } = await httpsRequest(nextUrl);
+      const page: HFTreeItem[] = JSON.parse(body);
+      items.push(...page);
+      const link = headers['link'];
+      nextUrl = parseNextLink(Array.isArray(link) ? link[0] : link);
+    }
     
     // 过滤并解析文件
     const files: HFFile[] = items
@@ -332,6 +376,7 @@ export function getAvailableQuantizations(repo: HFRepo): string[] {
  * 构建下载 URL
  */
 export function getDownloadUrl(modelId: string, filename: string): string {
+  assertValidModelId(modelId);
   return `https://huggingface.co/${modelId}/resolve/main/${filename}`;
 }
 

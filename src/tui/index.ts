@@ -32,16 +32,19 @@ blessedElement.prototype.render = function(this: any) {
 blessedElement.prototype._render = blessedElement.prototype.render;
 // --- End monkey patch ---
 
-import { rmSync, readdirSync, writeFileSync } from 'fs';
-import { basename, dirname, isAbsolute, join } from 'path';
-import { execSync } from 'child_process';
-import { ModelInfo, ServerOptions } from '../types.js';
-import { scanModels, findModel } from '../utils/model-scanner.js';
-import { getServerStatus, startServer, stopServer, readLastLogs, getLogFile } from '../utils/process-manager.js';
-import { loadPresets, getPreset, savePreset, deletePreset } from '../utils/preset-manager.js';
-import { getExpandedConfig } from '../utils/config-manager.js';
+import { existsSync, readdirSync, writeFileSync } from 'fs';
+import { rm } from 'fs/promises';
+import { basename, dirname, join } from 'path';
+import { execSync, execFile } from 'child_process';
+import { promisify } from 'util';
+import { ModelInfo, Preset, ServerOptions } from '../types.js';
+import { getGpuInfo, getRamInfo, warmSystemInfoCache, getCachedGpuCount, getLanIPv4 } from './system-info.js';
+import { scanModels, findModel, resolveSpecModel } from '../utils/model-scanner.js';
+import { getServerStatus, startServer, stopServer, readLastLogs, getLogFile, isLlamaServerProcess, checkLlamaServerVersion, ctxAutoFitConflict, getDefaultSlotSavePath, MIN_LLAMA_SERVER_BUILD } from '../utils/process-manager.js';
+import { loadPresets, getPreset, savePreset, deletePreset, presetExists, renamePreset } from '../utils/preset-manager.js';
+import { getExpandedConfig, getConfigDir } from '../utils/config-manager.js';
+import { resolveServerOptions } from '../utils/server-options.js';
 import { createRequestLogger } from '../utils/request-logger.js';
-import { CONFIG_DIR } from '../utils/config-manager.js';
 import { 
   fetchRepoFiles, 
   getAvailableQuantizations, 
@@ -58,15 +61,16 @@ import {
   QuantizationEstimate 
 } from '../utils/model-recommender.js';
 import { 
-  DownloadManager, 
+  DownloadManagerLike, 
   DownloadProgress, 
-  DownloadTask,
   DownloadStatus,
-  formatSpeed, 
-  formatEta, 
   checkDiskSpace 
 } from '../utils/downloader.js';
-import { verifySha256, VerifyProgress } from '../utils/verifier.js';
+import { createDownloadManager } from '../utils/download-backend.js';
+import { verifySha256 } from '../utils/verifier.js';
+import { confirmDialog, isModalOpen, isEditingInput } from './dialogs.js';
+import { createProgressBar } from './widgets.js';
+import { formatUptime } from '../utils/format.js';
 import { 
   generateAndSavePreset, 
   getModelStoragePath, 
@@ -77,51 +81,11 @@ import {
   scanIncompleteDownloads,
   deleteDownloadMeta,
   deletePartialFile,
-  readDownloadMeta,
   cleanupEmptyDirs,
-  IncompleteDownload,
+  inferModelIdFromPath,
 } from '../utils/download-meta.js';
 
-// 获取 NVIDIA GPU 信息
-function getGpuInfo(): Array<{ used: number; total: number; percent: number; temp: number }> | null {
-  try {
-    const output = execSync(
-      'nvidia-smi --query-gpu=memory.used,memory.total,temperature.gpu --format=csv,noheader,nounits',
-      { encoding: 'utf-8', timeout: 2000 }
-    );
-    const lines = output.trim().split('\n').filter(Boolean);
-    if (lines.length === 0) return null;
-    return lines.map((line) => {
-      const [used, total, temp] = line.split(', ').map(Number);
-      return {
-        used,
-        total,
-        percent: Math.round((used / total) * 100),
-        temp,
-      };
-    });
-  } catch {
-    return null;
-  }
-}
-
-// 获取系统内存信息
-function getRamInfo(): { used: number; total: number; percent: number } {
-  try {
-    const output = execSync('free -m', { encoding: 'utf-8', timeout: 2000 });
-    const lines = output.trim().split('\n');
-    const memLine = lines[1].split(/\s+/);
-    const total = parseInt(memLine[1]);
-    const used = parseInt(memLine[2]);
-    return {
-      used,
-      total,
-      percent: Math.round((used / total) * 100),
-    };
-  } catch {
-    return { used: 0, total: 0, percent: 0 };
-  }
-}
+const execFileP = promisify(execFile);
 
 export function createTUI(): void {
   const screen = blessed.screen({
@@ -152,20 +116,20 @@ export function createTUI(): void {
     meta: DownloadMeta;
     downloadedBytes: number;
     status: DownloadStatus;
+    speed: number; // bytes/sec,来自 DownloadManager 的 EMA 平滑速度
   }
 
   let downloadManagerOverlay: blessed.Widgets.BoxElement | null = null;
   let downloadManagerList: blessed.Widgets.ListElement | null = null;
   let downloadManagerInfo: blessed.Widgets.BoxElement | null = null;
-  let downloadManagerHelp: blessed.Widgets.BoxElement | null = null;
   let downloadManagerVisible = false;
   let downloadManagerListKeys: string[] = [];
   let downloadManagerSelectedKeys = new Set<string>();
-  let activeDownloadManager: DownloadManager | null = null;
+  let activeDownloadManager: DownloadManagerLike | null = null;
+  let activeDownloadProgressHandler: ((progress: DownloadProgress) => void) | null = null;
   let activeDownloadPaused = false;
   let activeDownloadSnapshot = new Map<string, DownloadEntry>();
   let activeDownloadTaskIds = new Map<string, string>();
-  let downloadStatusInterval: ReturnType<typeof setInterval> | null = null;
 
   // 颜色主题 - 现代护眼风格 (Catppuccin Macchiato)
   const theme = {
@@ -199,7 +163,7 @@ export function createTUI(): void {
 {${theme.warning}-fg}    /|  |\\    {/}{${theme.muted}-fg}manage models, presets & requests{/}`;
 
   // 标题栏
-  const header = blessed.box({
+  blessed.box({
     parent: screen,
     top: 0,
     left: 0,
@@ -329,6 +293,15 @@ export function createTUI(): void {
     tags: true,
     border: { type: 'line' },
     content: '',
+    focusable: true,
+    keys: true,
+    mouse: true,
+    scrollable: true,
+    alwaysScroll: true,
+    scrollbar: {
+      ch: '█',
+      style: { fg: theme.surface2 },
+    },
     style: {
       fg: theme.text,
       
@@ -348,6 +321,15 @@ export function createTUI(): void {
     tags: true,
     border: { type: 'line' },
     content: '',
+    focusable: true,
+    keys: true,
+    mouse: true,
+    scrollable: true,
+    alwaysScroll: true,
+    scrollbar: {
+      ch: '█',
+      style: { fg: theme.surface2 },
+    },
     style: {
       fg: theme.text,
       
@@ -355,6 +337,43 @@ export function createTUI(): void {
     },
     padding: { left: 1, right: 1, top: 1 },
   });
+
+  // blessed 的 Box 不自带键盘滚动(只有鼠标滚轮),手动绑定。
+  // 注意必须用元素级 on('keypress')(仅焦点时触发);Element.key() 是程序级
+  // 全局注册,焦点不在也会滚动,且元素销毁后泄漏
+  function bindPanelScrollKeys(box: blessed.Widgets.BoxElement): void {
+    const page = () => Math.max(1, (box.height as number) - 3);
+    box.on('keypress', (_ch: string, key: any) => {
+      const name = key && key.name;
+      switch (name) {
+        case 'up':
+        case 'k':
+          box.scroll(-1);
+          break;
+        case 'down':
+        case 'j':
+          box.scroll(1);
+          break;
+        case 'pageup':
+          box.scroll(-page());
+          break;
+        case 'pagedown':
+          box.scroll(page());
+          break;
+        case 'home':
+          box.scrollTo(0);
+          break;
+        case 'end':
+          box.scrollTo(box.getScrollHeight());
+          break;
+        default:
+          return;
+      }
+      screen.render();
+    });
+  }
+  bindPanelScrollKeys(infoBox);
+  bindPanelScrollKeys(resourceBox);
 
   // 左侧日志窗口 - llama.cpp 服务器日志
   const serverLogBox = blessed.log({
@@ -407,7 +426,7 @@ export function createTUI(): void {
   });
 
   // 快捷键提示
-  const helpBar = blessed.box({
+  blessed.box({
     parent: screen,
     bottom: 0,
     left: 0,
@@ -424,38 +443,76 @@ export function createTUI(): void {
 
   // === 功能函数 ===
 
+  // 未完成下载扫描缓存:全量 updateStatus 不再每次递归遍历模型目录,
+  // 仅在下载管理器打开/删除/续传(由调用方置失效)或距上次扫描超过 TTL 时重算
+  const INCOMPLETE_SCAN_TTL = 5000;
+  let incompleteScanCache: { time: number; count: number } | null = null;
+
+  function getIncompleteDownloadCount(modelsDir: string): number {
+    const now = Date.now();
+    if (incompleteScanCache && now - incompleteScanCache.time < INCOMPLETE_SCAN_TTL) {
+      return incompleteScanCache.count;
+    }
+    const count = scanIncompleteDownloads(modelsDir).length;
+    incompleteScanCache = { time: now, count };
+    return count;
+  }
+
+  function invalidateIncompleteScanCache(): void {
+    incompleteScanCache = null;
+  }
+
+  // 状态栏静态段缓存 + 上次渲染内容,供轻量刷新复用
+  let statusStaticSegments: { base: string; incomplete: string } | null = null;
+  let lastStatusContent: string | null = null;
+
+  // 状态栏下载进度段文案(全量/轻量刷新共用)
+  function buildDownloadSegment(): string {
+    const activeProgress = getActiveDownloadProgress();
+    if (!activeProgress.active) return '';
+    return `  |  {${theme.info}-fg}⬇ ${activeProgress.label}{/} {${theme.success}-fg}${activeProgress.percent}%{/} {${theme.muted}-fg}[S] Show{/}`;
+  }
+
   function updateStatus(): void {
     const status = getServerStatus();
-    let content = '';
     const config = getExpandedConfig();
-    const incompleteCount = scanIncompleteDownloads(config.modelsDir).length;
-    const activeProgress = getActiveDownloadProgress();
+    const incompleteCount = getIncompleteDownloadCount(config.modelsDir);
+    let base = '';
 
     if (status.running || proxyServer) {
       const modelName = basename(status.model || 'Unknown');
       const proxyStatus = proxyServer ? `{${theme.success}-fg}●{/}` : `{${theme.error}-fg}●{/}`;
-      content = `{${theme.success}-fg}●{/} Running  |  ` +
+      base = `{${theme.success}-fg}●{/} Running  |  ` +
         `{${theme.secondary}-fg}PID:{/} ${status.pid}  |  ` +
         `{${theme.secondary}-fg}Port:{/} ${currentPublicPort}  |  ` +
         `{${theme.secondary}-fg}Proxy:{/} ${proxyStatus}  |  ` +
         `{${theme.secondary}-fg}Model:{/} ${modelName}`;
-      if (activeProgress.active) {
-        content += `  |  {${theme.info}-fg}⬇ ${activeProgress.label}{/} {${theme.success}-fg}${activeProgress.percent}%{/} {${theme.muted}-fg}[S] Show{/}`;
-      }
-      if (incompleteCount > 0) {
-        content += `  |  {${theme.warning}-fg}⚠ ${incompleteCount} incomplete download(s){/}`;
-      }
     } else {
-      content = `{${theme.error}-fg}●{/} Not Running`;
-      if (activeProgress.active) {
-        content += `  |  {${theme.info}-fg}⬇ ${activeProgress.label}{/} {${theme.success}-fg}${activeProgress.percent}%{/} {${theme.muted}-fg}[S] Show{/}`;
-      }
-      if (incompleteCount > 0) {
-        content += `  |  {${theme.warning}-fg}⚠ ${incompleteCount} incomplete download(s){/}`;
-      }
+      base = `{${theme.error}-fg}●{/} Not Running`;
     }
 
-    statusBar.setContent(` ${content}`);
+    const incomplete = incompleteCount > 0
+      ? `  |  {${theme.warning}-fg}⚠ ${incompleteCount} incomplete download(s){/}`
+      : '';
+    statusStaticSegments = { base, incomplete };
+
+    const content = ` ${base}${buildDownloadSegment()}${incomplete}`;
+    lastStatusContent = content;
+    statusBar.setContent(content);
+    screen.render();
+  }
+
+  // 轻量状态栏刷新:只更新下载进度段,不重复读 PID/配置/扫描磁盘
+  // (下载进度回调每 500ms 触发一次,全量 updateStatus 会阻塞事件循环)
+  function updateDownloadStatusSegment(): void {
+    if (!statusStaticSegments) {
+      updateStatus();
+      return;
+    }
+    const content = ` ${statusStaticSegments.base}${buildDownloadSegment()}${statusStaticSegments.incomplete}`;
+    if (content === lastStatusContent) return;
+    lastStatusContent = content;
+    statusBar.setContent(content);
     screen.render();
   }
 
@@ -467,12 +524,18 @@ export function createTUI(): void {
     
     if (status.running) {
       const proxyStatus = proxyServer ? `{${theme.success}-fg}Running{/}` : `{${theme.error}-fg}Not Running{/}`;
+      // proxy 绑 0.0.0.0,局域网可直接访问;显示 LAN base URL 方便其他机器对接
+      const lanIp = getLanIPv4();
+      const lanLine = lanIp
+        ? `  {${theme.secondary}-fg}LAN API:{/}    http://${lanIp}:${currentPublicPort}/v1\n`
+        : '';
       content = `{bold}Server Status{/bold}\n\n` +
         `  {${theme.secondary}-fg}Status:{/}     {${theme.success}-fg}Running{/}\n` +
         `  {${theme.secondary}-fg}PID:{/}        ${status.pid}\n` +
         `  {${theme.secondary}-fg}Model:{/}      ${basename(status.model || '')}\n\n` +
         `{bold}Network{/bold}\n\n` +
         `  {${theme.secondary}-fg}Public URL:{/}  http://localhost:${currentPublicPort}\n` +
+        lanLine +
         `  {${theme.secondary}-fg}Internal:{/}    http://127.0.0.1:${currentInternalPort}\n` +
         `  {${theme.secondary}-fg}Proxy:{/}       ${proxyStatus}\n`;
       
@@ -493,92 +556,120 @@ export function createTUI(): void {
     screen.render();
   }
 
-  function updateResources(): void {
-    const status = getServerStatus();
-    const gpus = getGpuInfo();
-    const ram = getRamInfo();
-    
-    let content = '';
-    
-    // RAM 信息
-    content += `{bold}System RAM{/bold}\n\n`;
-    const ramBar = createProgressBar(ram.percent, 20);
-    content += `  ${ramBar} ${ram.percent}%\n`;
-    content += `  {${theme.secondary}-fg}${ram.used} / ${ram.total} MB{/}\n\n`;
-    
-    // GPU 信息
-    if (gpus && gpus.length > 0) {
-      content += `{bold}GPU VRAM{/bold}\n\n`;
-      for (let i = 0; i < gpus.length; i++) {
-        const gpu = gpus[i];
-        const vramBar = createProgressBar(gpu.percent, 16);
-        content += `  GPU${i} ${vramBar} ${gpu.percent}%\n`;
-        content += `    {${theme.secondary}-fg}${gpu.used} / ${gpu.total} MB{/}  {${theme.secondary}-fg}Temp:{/} ${gpu.temp}°C\n`;
-      }
-      content += '\n';
-    }
-    
-    // 服务器参数
-    if (status.running && Object.keys(currentServerOptions).length > 0) {
-      content += `{bold}Server Config{/bold}\n\n`;
-      if (currentServerOptions.ctxSize) {
-        content += `  {${theme.secondary}-fg}Context:{/} ${currentServerOptions.ctxSize}\n`;
-      }
-      if (currentServerOptions.gpuLayers) {
-        content += `  {${theme.secondary}-fg}GPU Layers:{/} ${currentServerOptions.gpuLayers}\n`;
-      }
-      if (currentServerOptions.tensorSplit) {
-        content += `  {${theme.secondary}-fg}Tensor Split:{/} ${currentServerOptions.tensorSplit}\n`;
-      }
-      if (currentServerOptions.batchSize !== undefined) {
-        content += `  {${theme.secondary}-fg}Batch Size:{/} ${currentServerOptions.batchSize}\n`;
-      }
-      if (currentServerOptions.threadsBatch !== undefined) {
-        content += `  {${theme.secondary}-fg}Threads Batch:{/} ${currentServerOptions.threadsBatch}\n`;
-      }
-      if (currentServerOptions.cachePrompt !== undefined) {
-        content += `  {${theme.secondary}-fg}Cache Prompt:{/} ${currentServerOptions.cachePrompt ? 'on' : 'off'}\n`;
-      }
-      if (currentServerOptions.cacheReuse !== undefined) {
-        content += `  {${theme.secondary}-fg}Cache Reuse:{/} ${currentServerOptions.cacheReuse}\n`;
-      }
-      if (currentServerOptions.fit !== undefined) {
-        content += `  {${theme.secondary}-fg}Fit:{/} ${currentServerOptions.fit ? 'on' : 'off'}\n`;
-      }
-      if (currentServerOptions.reasoningBudget !== undefined) {
-        let thinking = '{green-fg}On{/}';
-        if (currentServerOptions.reasoningBudget === 0) {
-          thinking = '{yellow-fg}Off{/}';
+  // 周期任务防重入:上一轮采集未结束(如 nvidia-smi 超时≈刷新间隔)则跳过本轮
+  let resourcesTickRunning = false;
+
+  async function updateResources(): Promise<void> {
+    if (resourcesTickRunning) return;
+    resourcesTickRunning = true;
+    try {
+      const status = getServerStatus();
+      // 异步采集,避免 nvidia-smi/free 阻塞事件循环
+      const [gpus, ram] = await Promise.all([getGpuInfo(), getRamInfo()]);
+
+      let content = '';
+
+      // RAM 信息
+      content += `{bold}System RAM{/bold}\n\n`;
+      const ramBar = createProgressBar(ram.percent, 20, theme);
+      content += `  ${ramBar} ${ram.percent}%\n`;
+      content += `  {${theme.secondary}-fg}${ram.used} / ${ram.total} MB{/}\n\n`;
+
+      // GPU 信息
+      if (gpus && gpus.length > 0) {
+        content += `{bold}GPU VRAM{/bold}\n\n`;
+        for (let i = 0; i < gpus.length; i++) {
+          const gpu = gpus[i];
+          const vramBar = createProgressBar(gpu.percent, 16, theme);
+          content += `  GPU${i} ${vramBar} ${gpu.percent}%\n`;
+          content += `    {${theme.secondary}-fg}${gpu.used} / ${gpu.total} MB{/}  {${theme.secondary}-fg}Temp:{/} ${gpu.temp}°C\n`;
         }
-        content += `  {${theme.secondary}-fg}Thinking:{/} ${thinking}\n`;
+        content += '\n';
       }
-      if (currentServerOptions.mmproj) {
-        content += `  {${theme.secondary}-fg}Vision:{/} {green-fg}Yes{/}\n`;
+
+      // 服务器参数
+      if (status.running && Object.keys(currentServerOptions).length > 0) {
+        content += `{bold}Server Config{/bold}\n\n`;
+        if (currentServerOptions.ctxSize) {
+          content += `  {${theme.secondary}-fg}Context:{/} ${currentServerOptions.ctxSize}\n`;
+        }
+        if (currentServerOptions.gpuLayers) {
+          content += `  {${theme.secondary}-fg}GPU Layers:{/} ${currentServerOptions.gpuLayers}\n`;
+        }
+        if (currentServerOptions.tensorSplit) {
+          content += `  {${theme.secondary}-fg}Tensor Split:{/} ${currentServerOptions.tensorSplit}\n`;
+        }
+        if (currentServerOptions.batchSize !== undefined) {
+          content += `  {${theme.secondary}-fg}Batch Size:{/} ${currentServerOptions.batchSize}\n`;
+        }
+        if (currentServerOptions.threadsBatch !== undefined) {
+          content += `  {${theme.secondary}-fg}Threads Batch:{/} ${currentServerOptions.threadsBatch}\n`;
+        }
+        if (currentServerOptions.cachePrompt !== undefined) {
+          content += `  {${theme.secondary}-fg}Cache Prompt:{/} ${currentServerOptions.cachePrompt ? 'on' : 'off'}\n`;
+        }
+        if (currentServerOptions.cacheReuse !== undefined) {
+          content += `  {${theme.secondary}-fg}Cache Reuse:{/} ${currentServerOptions.cacheReuse}\n`;
+        }
+        if (currentServerOptions.fit !== undefined) {
+          content += `  {${theme.secondary}-fg}Fit:{/} ${currentServerOptions.fit ? 'on' : 'off'}\n`;
+        }
+        if (currentServerOptions.reasoningBudget !== undefined) {
+          let thinking = '{green-fg}On{/}';
+          if (currentServerOptions.reasoningBudget === 0) {
+            thinking = '{yellow-fg}Off{/}';
+          }
+          content += `  {${theme.secondary}-fg}Thinking:{/} ${thinking}\n`;
+        }
+        if (currentServerOptions.mmproj) {
+          content += `  {${theme.secondary}-fg}Vision:{/} {green-fg}Yes{/}\n`;
+        }
+        if (currentServerOptions.specType) {
+          content += `  {${theme.secondary}-fg}Spec Type:{/} ${currentServerOptions.specType}\n`;
+        }
       }
+
+      resourceBox.setContent(content);
+      screen.render();
+    } finally {
+      resourcesTickRunning = false;
     }
-    
-    resourceBox.setContent(content);
-    screen.render();
   }
 
-  // 创建进度条
-  function createProgressBar(percent: number, width: number): string {
-    const filled = Math.round((percent / 100) * width);
-    const empty = width - filled;
-    let color = theme.success;
-    if (percent > 80) color = theme.error;
-    else if (percent > 60) color = theme.warning;
-    return `{${color}-fg}${'█'.repeat(filled)}{/}{${theme.surface2}-fg}${'░'.repeat(empty)}{/}`;
-  }
+  // 上次渲染的日志内容,相同则不重绘
+  let lastLogContent: string | null = null;
+  let logsTickRunning = false;
 
-  function updateLogs(): void {
-    if (logPaused) return;
-    const logs = readLastLogs(100);
-    if (logs) {
-      serverLogBox.setContent(logs);
-      serverLogBox.setScrollPerc(100);
+  async function updateLogs(): Promise<void> {
+    if (logPaused || logsTickRunning) return;
+    logsTickRunning = true;
+    try {
+      // 异步 tail,避免 execSync 阻塞事件循环
+      let logs = '';
+      const logFile = getLogFile();
+      if (existsSync(logFile)) {
+        try {
+          const { stdout } = await execFileP('tail', ['-n', '100', logFile], { encoding: 'utf-8' });
+          logs = stdout;
+        } catch {
+          logs = '';
+        }
+      }
+      // 内容没有变化则跳过重绘
+      if (logs === lastLogContent) return;
+      // 首次填充或用户本就在底部时才跟随滚动;用户上翻查看历史时不强拉到底部
+      const followTail = lastLogContent === null || serverLogBox.getScrollPerc() >= 99;
+      lastLogContent = logs;
+      if (logs) {
+        serverLogBox.setContent(logs);
+        if (followTail) {
+          serverLogBox.setScrollPerc(100);
+        }
+      }
+      screen.render();
+    } finally {
+      logsTickRunning = false;
     }
-    screen.render();
   }
 
   function getActiveDownloadProgress(): { active: boolean; percent: number; label: string } {
@@ -611,7 +702,6 @@ export function createTUI(): void {
   function loadPresetsList(): void {
     const presets = loadPresets();
     presetNames = Object.keys(presets);
-    const config = getExpandedConfig();
     const items = presetNames.map(name => {
       const p = presets[name];
       let thinking = `{${theme.success}-fg}[think]{/}`;
@@ -628,31 +718,15 @@ export function createTUI(): void {
     }
   }
 
-  function inferModelIdFromPath(modelPath: string, modelsDir: string): string {
-    if (!modelPath) return 'Unknown';
-    const normalizedDir = modelsDir.replace(/\/+$/, '');
-    const normalizedPath = modelPath.replace(/\/+$/, '');
-
-    if (normalizedPath.startsWith(normalizedDir)) {
-      const relative = normalizedPath.slice(normalizedDir.length).replace(/^\//, '');
-      const parts = relative.split('/');
-      if (parts.length >= 2) {
-        return `${parts[0]}/${parts[1]}`;
-      }
-    }
-
-    return basename(modelPath);
-  }
-
-  function showMessage(msg: string, type: 'info' | 'success' | 'error' = 'info'): void {
-    const color = type === 'success' ? theme.success : type === 'error' ? theme.error : theme.primary;
+  function showMessage(msg: string, type: 'info' | 'success' | 'error' | 'warning' = 'info'): void {
+    const color = type === 'success' ? theme.success : type === 'error' ? theme.error : type === 'warning' ? theme.warning : theme.primary;
     serverLogBox.log(`{${color}-fg}${msg}{/${color}-fg}`);
     screen.render();
   }
 
   function getTensorSplitOptions(): string[] {
-    const systemInfo = getSystemInfo();
-    const gpuCount = systemInfo.gpus?.length || 0;
+    // GPU 数量运行期不变,读启动时预热好的缓存,避免每次按键都跑 nvidia-smi
+    const gpuCount = getCachedGpuCount();
     if (gpuCount <= 1) return [''];
     if (gpuCount === 2) {
       return [
@@ -679,99 +753,167 @@ export function createTUI(): void {
     return ['', splits.join(',')];
   }
 
-  async function handleStartServer(): Promise<void> {
+  // 启动 llama-server + 请求代理;任一步失败都回滚到全停状态,避免半启动
+  async function launchServer(options: ServerOptions, publicPort: number): Promise<void> {
+    // 版本探测:过旧的 llama-server 提前警告(--fit/-ngl auto/--reasoning-budget 需要较新版本)
+    const versionCheck = checkLlamaServerVersion(getExpandedConfig().llamaServerPath);
+    if (versionCheck && !versionCheck.supported) {
+      showMessage(`llama-server build ${versionCheck.build} 过旧(需要 ≥ b${MIN_LLAMA_SERVER_BUILD}),--fit/-ngl auto 等参数可能不受支持,建议升级 llama.cpp`, 'warning');
+    }
+    // ctxSize 'auto' 与锁定 GPU 层数/多卡切分冲突时警告(fit 降级但仍可启动,不阻断)
+    const fitConflict = ctxAutoFitConflict(options);
+    if (fitConflict) {
+      showMessage(fitConflict, 'warning');
+    }
+    // 只回滚本进程真正启动的服务器:startServer 拒绝(如锁被 CLI 持有)时,
+    // 服务器可能是别的进程刚启动的,不能误停
+    let serverStarted = false;
+    try {
+      await startServer(options, { publicPort });
+      serverStarted = true;
+      showMessage(`llama-server started on internal port ${options.port}`, 'success');
+
+      // CPU 回退自检:日志每次启动都会截断,只含本次输出。
+      // 混合架构(GDN/Mamba 类)只要有层落到 CPU,逐 token 计算都要过 CPU,
+      // 实测生成速度会掉到全 GPU 的 1/5 以下
+      const startupLogs = readLastLogs(80);
+      if (/assigned to device CPU|not supported, set to disabled/.test(startupLogs)) {
+        showMessage('WARNING: 部分模型层因显存不足回退到 CPU,生成速度会严重下降。建议:预设中 GPU Layers 设 99 + Context 固定较小值,或关闭视觉/其他占显存的进程后重启', 'warning');
+      }
+
+      // 启动代理
+      await startProxy(publicPort, options.port);
+      showMessage(`Proxy listening on port ${publicPort}`, 'success');
+    } catch (err) {
+      // startServer 已成功但 startProxy 失败(如 EADDRINUSE):回滚已启动的服务器,
+      // 避免留下无 PID 管理的孤儿进程
+      // 同时清掉 proxyServer 引用(EADDRINUSE 时变量非空但未监听),避免状态栏误显示代理在跑
+      try { stopProxy(); } catch {}
+      if (serverStarted) {
+        try { await stopServer(); } catch {}
+      }
+      throw err;
+    }
+
+    // 全部成功后才保存服务器参数
+    currentServerOptions = options;
+    updateStatus();
+    updateInfo();
+    startLogWatcher();
+    startResourceWatcher();
+  }
+
+  // 返回是否成功启动(供 Restart 判断是否需要清理残留状态)
+  async function handleStartServer(): Promise<boolean> {
     const status = getServerStatus();
-    
+
     if (status.running) {
       showMessage('Server is already running. Stop it first.', 'error');
-      return;
+      return false;
     }
 
     if (!currentModel) {
       showMessage('Please select a model first.', 'error');
-      return;
+      return false;
     }
 
     const config = getExpandedConfig();
     currentPublicPort = config.defaultPort;
     currentInternalPort = config.defaultPort + 1;
 
-    // llama-server 监听内部端口
-    const options: ServerOptions = {
-      model: currentModel.path,
-      mmproj: currentModel.mmproj,
-      useVision: true,
-      ctxSize: config.defaultCtxSize,
-      gpuLayers: config.defaultGpuLayers,
-      tensorSplit: undefined,
-      fit: true,
-      batchSize: config.defaultBatchSize,
-      threadsBatch: config.defaultThreadsBatch,
-      cachePrompt: config.defaultCachePrompt,
-      cacheReuse: config.defaultCacheReuse,
-      kvCacheType: 'f16',
-      chatTemplate: undefined,
-      host: '127.0.0.1', // 内部只监听 localhost
-      port: currentInternalPort,
-      jinja: true,
-      flashAttn: 'auto',
-      reasoningBudget: -1,
-    };
+    // llama-server 监听内部端口;默认值由 resolveServerOptions 合并(内置默认 + config),
+    // TUI 专属字段(model 实际路径、内部 host/port、fit/kvCacheType 硬编码)作为覆盖层
+    const options = resolveServerOptions(
+      {
+        model: currentModel.path,
+        mmproj: currentModel.mmproj,
+        fit: true,
+        kvCacheType: 'f16',
+        host: '127.0.0.1', // 内部只监听 localhost
+        port: currentInternalPort,
+      },
+      null,
+      config,
+    );
+
+    // 投机解码模块解析:仅 draft 系类型自动挂载配对模块;必须外挂模块却配不到时警告
+    const spec = resolveSpecModel(options.specType, options.specModel, currentModel.mtp, 'zh');
+    options.specModel = spec.specModel;
+    if (spec.warning) {
+      showMessage(spec.warning, 'warning');
+    }
 
     showMessage('Starting server...');
-    
+
     try {
-      const result = await startServer(options);
-      currentServerOptions = options; // 保存服务器参数
-      showMessage(`llama-server started on internal port ${currentInternalPort}`, 'success');
-      
-      // 启动代理
-      await startProxy(currentPublicPort, currentInternalPort);
-      showMessage(`Proxy listening on port ${currentPublicPort}`, 'success');
-      
-      updateStatus();
-      updateInfo();
-      startLogWatcher();
-      startResourceWatcher();
+      await launchServer(options, currentPublicPort);
+      return true;
     } catch (err) {
       showMessage(`Failed to start: ${(err as Error).message}`, 'error');
+      return false;
     }
   }
 
   async function handleStopServer(): Promise<void> {
     const status = getServerStatus();
-    
+
     if (!status.running && !proxyServer) {
       showMessage('Server is not running.', 'error');
       return;
     }
 
     showMessage('Stopping server...');
-    
+
     try {
       stopProxy();
-      await stopServer();
-      currentServerOptions = {}; // 清空服务器参数
+      try {
+        await stopServer();
+      } catch (err) {
+        // 仅代理在跑(服务器已不在)时 stopServer 拒绝 "not running":视为已停止
+        if (!(err as Error).message.includes('not running')) throw err;
+      }
       showMessage('Server and proxy stopped.', 'success');
+    } catch (err) {
+      showMessage(`Failed to stop: ${(err as Error).message}`, 'error');
+    } finally {
+      // 状态清理无论成败都要做:代理已停,参数与 watcher 不应残留
+      currentServerOptions = {}; // 清空服务器参数
       updateStatus();
       updateInfo();
       updateResources();
       stopLogWatcher();
       stopResourceWatcher();
-    } catch (err) {
-      showMessage(`Failed to stop: ${(err as Error).message}`, 'error');
     }
   }
 
   async function handleRestartServer(): Promise<void> {
     const status = getServerStatus();
-    
+
     if (status.running) {
       showMessage('Stopping server...');
-      await stopServer();
+      // 先停代理再停服务器,避免代理继续转发到已死的后端
+      stopProxy();
+      try {
+        await stopServer();
+      } catch (err) {
+        // PID 已失效(仅代理在跑)时 "not running" 视为已停止;
+        // 其他错误提示后仍走启动流程(handleStartServer 会拦截"已在运行")
+        if (!(err as Error).message.includes('not running')) {
+          showMessage(`Failed to stop: ${(err as Error).message}`, 'error');
+        }
+      }
     }
-    
-    await handleStartServer();
+
+    const started = await handleStartServer();
+    if (!started && !getServerStatus().running) {
+      // 重启失败且服务器已停:清理旧参数与 watcher,避免半启动残留
+      currentServerOptions = {};
+      updateStatus();
+      updateInfo();
+      updateResources();
+      stopLogWatcher();
+      stopResourceWatcher();
+    }
   }
 
   async function handleEjectModel(): Promise<void> {
@@ -783,31 +925,37 @@ export function createTUI(): void {
     }
 
     showMessage('Ejecting model and freeing VRAM...', 'info');
-    
+
     try {
       // 停止代理
       stopProxy();
-      
-      // 停止服务器
-      await stopServer();
-      
-      // 清空状态
-      currentServerOptions = {};
+
+      // 停止服务器(仅代理在跑时拒绝 "not running":视为已停止)
+      try {
+        await stopServer();
+      } catch (err) {
+        if (!(err as Error).message.includes('not running')) throw err;
+      }
+
+      // 服务器已停,模型引用可以清(失败路径保留 currentModel)
       currentModel = null;
-      
+
       // 强制触发 CUDA 内存回收
       try {
         execSync('nvidia-smi --gpu-reset 2>/dev/null || true', { timeout: 5000 });
       } catch {}
-      
+
       showMessage('Model ejected, VRAM freed.', 'success');
+    } catch (err) {
+      showMessage(`Failed to eject: ${(err as Error).message}`, 'error');
+    } finally {
+      // 状态清理无论成败都要做:代理已停,参数与 watcher 不应残留
+      currentServerOptions = {};
       updateStatus();
       updateInfo();
       updateResources();
       stopLogWatcher();
       stopResourceWatcher();
-    } catch (err) {
-      showMessage(`Failed to eject: ${(err as Error).message}`, 'error');
     }
   }
 
@@ -837,51 +985,63 @@ export function createTUI(): void {
     if (status.running) {
       showMessage('Stopping current server...');
       stopProxy();
-      await stopServer();
+      try {
+        await stopServer();
+      } catch (err) {
+        // PID 已失效(仅代理在跑)时 "not running" 视为已停止;
+        // 其他错误提示后仍尝试加载(startServer 会拦截"已在运行")
+        if (!(err as Error).message.includes('not running')) {
+          showMessage(`Failed to stop: ${(err as Error).message}`, 'error');
+        }
+      }
     }
 
     currentPublicPort = preset.port;
     currentInternalPort = preset.port + 1;
 
-    // llama-server 监听内部端口
-    const options: ServerOptions = {
-      model: model.path,
-      mmproj: model.mmproj,
-      useVision: preset.useVision ?? true,
-      ctxSize: preset.ctxSize,
-      gpuLayers: preset.gpuLayers,
-      tensorSplit: preset.tensorSplit,
-      fit: preset.fit ?? true,
-      batchSize: preset.batchSize ?? config.defaultBatchSize,
-      threadsBatch: preset.threadsBatch ?? config.defaultThreadsBatch,
-      cachePrompt: preset.cachePrompt ?? config.defaultCachePrompt,
-      cacheReuse: preset.cacheReuse ?? config.defaultCacheReuse,
-      kvCacheType: preset.kvCacheType || 'f16',
-      chatTemplate: preset.chatTemplate,
-      host: '127.0.0.1', // 内部只监听 localhost
-      port: currentInternalPort,
-      jinja: preset.jinja,
-      flashAttn: preset.flashAttn,
-      reasoningBudget: preset.reasoningBudget,
-    };
+    // llama-server 监听内部端口;preset 之上的 TUI 覆盖:model 用扫描到的实际路径,
+    // host/port 指内部监听地址,fit/kvCacheType 保留 TUI 的回退默认(不在内置默认层)
+    // mmproj 必须排除在 preset 层之外:扫描不到配对 mmproj 时(如文件已删)overlayDefined
+    // 会跳过覆盖层 undefined 而让 preset 里的过期路径渗漏,导致 --mmproj 指向不存在文件
+    const { mmproj: _presetMmproj, ...presetRest } = preset;
+    const options = resolveServerOptions(
+      {
+        model: model.path,
+        mmproj: model.mmproj, // 只来自扫描器配对结果;没有则不带视觉启动
+        fit: preset.fit ?? true,
+        kvCacheType: preset.kvCacheType || 'f16',
+        host: '127.0.0.1', // 内部只监听 localhost
+        port: currentInternalPort,
+      },
+      presetRest,
+      config,
+    );
+
+    // 投机解码模块解析:仅 draft 系类型自动挂载配对模块;必须外挂模块却配不到时警告
+    const spec = resolveSpecModel(options.specType, options.specModel, model.mtp, 'zh');
+    options.specModel = spec.specModel;
+    if (spec.warning) {
+      showMessage(spec.warning, 'warning');
+    }
 
     showMessage(`Loading preset "${name}"...`);
-    
+
+    let started = false;
     try {
-      const result = await startServer(options);
-      currentServerOptions = options; // 保存服务器参数
-      showMessage(`llama-server started on internal port ${currentInternalPort}`, 'success');
-      
-      // 启动代理
-      await startProxy(currentPublicPort, currentInternalPort);
-      showMessage(`Proxy listening on port ${currentPublicPort}`, 'success');
-      
-      updateStatus();
-      updateInfo();
-      startLogWatcher();
-      startResourceWatcher();
+      await launchServer(options, currentPublicPort);
+      started = true;
     } catch (err) {
       showMessage(`Failed: ${(err as Error).message}`, 'error');
+    }
+
+    if (!started && !getServerStatus().running) {
+      // 加载失败且服务器已停:清理旧参数与 watcher,避免半启动残留
+      currentServerOptions = {};
+      updateStatus();
+      updateInfo();
+      updateResources();
+      stopLogWatcher();
+      stopResourceWatcher();
     }
 
     presetList.hide();
@@ -915,16 +1075,19 @@ export function createTUI(): void {
   function showPresetList(): void {
     loadPresetsList();
     presetEditMode = false;  // 确保是加载模式
-    presetList.setLabel(' Presets ');
+    presetList.setLabel(' Presets (Enter load, n new) ');
     infoBox.hide();
     modelList.hide();
     presetList.show();
     presetList.focus();
+    bindNewPresetKey();
     screen.render();
   }
 
   // 编辑模式退出函数（需要在 hideSubLists 之前定义）
   let deleteHandler: (() => void) | null = null;
+  let newPresetHandler: (() => void) | null = null;
+  let renameHandler: (() => void) | null = null;
   
   function exitEditMode(): void {
     presetEditMode = false;
@@ -932,7 +1095,11 @@ export function createTUI(): void {
       presetList.unkey('d', deleteHandler);
       deleteHandler = null;
     }
-    presetList.setLabel(' Presets ');
+    if (renameHandler) {
+      presetList.unkey('r', renameHandler);
+      renameHandler = null;
+    }
+    presetList.setLabel(' Presets (Enter load, n new) ');
   }
 
   function hideSubLists(): void {
@@ -940,6 +1107,10 @@ export function createTUI(): void {
     presetList.hide();
     infoBox.show();
     exitEditMode();
+    if (newPresetHandler) {
+      presetList.unkey('n', newPresetHandler);
+      newPresetHandler = null;
+    }
     if (modelDeleteHandler) {
       modelList.unkey('d', modelDeleteHandler);
       modelDeleteHandler = null;
@@ -951,53 +1122,31 @@ export function createTUI(): void {
 
   async function confirmDeleteModel(model: ModelInfo): Promise<void> {
     const modelDir = dirname(model.path);
-    const dialog = blessed.box({
-      parent: screen,
-      top: 'center',
-      left: 'center',
-      width: 60,
-      height: 9,
-      label: ' Delete Model ',
-      tags: true,
-      shadow: true,
-      border: { type: 'line' },
-      style: {
-        fg: theme.text,
-        bg: theme.surface0,
-        border: { fg: theme.error },
-      },
-      padding: { left: 2, right: 2, top: 1 },
-    });
-
-    dialog.setContent(
+    confirmDialog(
+      screen,
       `Delete model directory?\n\n` +
       `{bold}${modelDir}{/bold}\n\n` +
-      `{${theme.secondary}-fg}[Y]{/} Yes  {${theme.secondary}-fg}[N]{/} No`
-    );
-
-    screen.render();
-
-    const onKeyPress = (ch: string, key: any) => {
-      if (key.name === 'y' || key.name === 'n' || key.name === 'escape') {
-        screen.removeListener('keypress', onKeyPress);
-        dialog.destroy();
-
-        if (key.name === 'y') {
-          try {
-            rmSync(modelDir, { recursive: true, force: true });
-            showMessage(`Model deleted: ${basename(modelDir)}`, 'success');
-            loadModels();
-            showModelList();
-          } catch (err) {
-            showMessage(`Delete failed: ${(err as Error).message}`, 'error');
-          }
+      `{${theme.secondary}-fg}[Y]{/} Yes  {${theme.secondary}-fg}[N]{/} No`,
+      async () => {
+        try {
+          // 异步删除,多 GB 模型目录不再阻塞 UI
+          await rm(modelDir, { recursive: true, force: true });
+          showMessage(`Model deleted: ${basename(modelDir)}`, 'success');
+          loadModels();
+          showModelList();
+        } catch (err) {
+          showMessage(`Delete failed: ${(err as Error).message}`, 'error');
         }
-
-        screen.render();
-      }
-    };
-
-    screen.on('keypress', onKeyPress);
+      },
+      {
+        label: ' Delete Model ',
+        width: 60,
+        height: 9,
+        borderColor: theme.error,
+        fg: theme.text,
+        bg: theme.surface0,
+      },
+    );
   }
 
   // 编辑预设界面
@@ -1006,7 +1155,7 @@ export function createTUI(): void {
     presetEditMode = true;
     
     // 修改预设列表标签
-    presetList.setLabel(' Edit Preset (Enter to edit, d to delete) ');
+    presetList.setLabel(' Edit Preset (Enter edit, d delete, r rename, n new) ');
     
     infoBox.hide();
     modelList.hide();
@@ -1025,59 +1174,289 @@ export function createTUI(): void {
       }
     };
     presetList.key('d', deleteHandler);
+
+    // r 重命名(与 deleteHandler 同样的 unkey-then-key 防重复);
+    // 全局 r 刷新在此模式下对 presetList 焦点让路(见 screen.key(['r']))
+    if (renameHandler) {
+      presetList.unkey('r', renameHandler);
+    }
+    renameHandler = () => {
+      const selectedIndex = (presetList as any).selected;
+      if (selectedIndex >= 0 && selectedIndex < presetNames.length) {
+        promptRenamePreset(presetNames[selectedIndex]);
+      }
+    };
+    presetList.key('r', renameHandler);
+    bindNewPresetKey();
     
     screen.render();
   }
 
   // 确认删除预设
   async function confirmDeletePreset(name: string): Promise<void> {
-    const dialog = blessed.box({
+    confirmDialog(
+      screen,
+      `Delete preset "{bold}${name}{/bold}"?\n\n` +
+      `{${theme.secondary}-fg}[Y]{/} Yes  {${theme.secondary}-fg}[N]{/} No`,
+      () => {
+        // 磁盘满/权限不足时 writeJsonAtomic 会抛错,不能让其穿透 blessed 按键派发杀死进程
+        try {
+          deletePreset(name);
+        } catch (err) {
+          showMessage(`Failed to delete preset: ${(err as Error).message}`, 'error');
+          return;
+        }
+        showMessage(`Preset "${name}" deleted.`, 'success');
+        loadPresetsList();
+        showEditPresetList();
+      },
+      {
+        label: ' Delete Preset ',
+        width: 50,
+        height: 7,
+        borderColor: theme.error,
+        fg: theme.text,
+        bg: theme.surface0,
+      },
+    );
+  }
+
+  // ========== 新建预设 ==========
+
+  // n 键绑定(加载/编辑两种列表模式共用,与 deleteHandler 同样的 unkey-then-key 防重复)
+  function bindNewPresetKey(): void {
+    if (newPresetHandler) {
+      presetList.unkey('n', newPresetHandler);
+    }
+    newPresetHandler = () => {
+      promptNewPresetName();
+    };
+    presetList.key('n', newPresetHandler);
+  }
+
+  // 取消新建时回到进入前的预设列表视图(加载或编辑模式)
+  function restorePresetListView(): void {
+    if (presetEditMode) {
+      showEditPresetList();
+    } else {
+      showPresetList();
+    }
+  }
+
+  // Step 1: 输入预设名称(校验失败保留已输入内容重新打开,可修改重试或 Esc 取消)
+  function promptNewPresetName(retryValue?: string): void {
+    // 隐藏 presetList:screen 级 Esc 处理器见列表可见会 hideSubLists 抢走焦点,
+    // 导致 textbox 的 cancel 收不到 Esc(同 showPresetEditor 的处理)
+    presetList.hide();
+
+    const inputBox = blessed.textbox({
       parent: screen,
       top: 'center',
       left: 'center',
       width: 50,
-      height: 7,
-      label: ' Delete Preset ',
+      height: 3,
+      label: ' New Preset Name ',
       tags: true,
       shadow: true,
       border: { type: 'line' },
       style: {
-        fg: theme.text,
-        bg: theme.surface0,
-        border: { fg: theme.error },
+        fg: overlayStyle.fg,
+        bg: overlayStyle.bg,
+        border: overlayStyle.border,
       },
-      padding: { left: 2, right: 2, top: 1 },
+      padding: { left: 1, right: 1 },
+      inputOnFocus: true,
+      censor: false,
     });
 
-    dialog.setContent(
-      `Delete preset "{bold}${name}{/bold}"?\n\n` +
-      `{${theme.secondary}-fg}[Y]{/} Yes  {${theme.secondary}-fg}[N]{/} No`
-    );
+    // 重试时回填上次输入,便于直接修改
+    if (retryValue) {
+      inputBox.setValue(retryValue);
+    }
 
+    inputBox.focus();
     screen.render();
 
-    const onKeyPress = (ch: string, key: any) => {
-      if (key.name === 'y' || key.name === 'n' || key.name === 'escape') {
-        screen.removeListener('keypress', onKeyPress);
-        dialog.destroy();
-        
-        if (key.name === 'y') {
-          deletePreset(name);
-          showMessage(`Preset "${name}" deleted.`, 'success');
-          loadPresetsList();
-          showEditPresetList();
-        }
-        screen.render();
+    inputBox.on('submit', (value: string) => {
+      const name = value.trim();
+      // blessed readInput 是一次性的:submit 触发后文本框已停止读入并回绕焦点,
+      // 必须销毁重建(下载对话框同样在 submit 时即销毁)
+      inputBox.destroy();
+      if (!name) {
+        showMessage('Preset name cannot be empty.', 'error');
+        promptNewPresetName();
+        return;
       }
-    };
+      // {} 会被 blessed tags 解析,破坏选择器/编辑器标签渲染;换行同样是垃圾字符
+      if (/[{}\n\r]/.test(name)) {
+        showMessage('Preset name cannot contain {, } or newlines.', 'error');
+        promptNewPresetName(name);
+        return;
+      }
+      if (presetExists(name)) {
+        showMessage(`Preset "${name}" already exists.`, 'error');
+        promptNewPresetName(name);
+        return;
+      }
+      screen.render();
+      showNewPresetModelPicker(name);
+    });
 
-    screen.on('keypress', onKeyPress);
+    inputBox.on('cancel', () => {
+      inputBox.destroy();
+      restorePresetListView();
+      screen.render();
+    });
+
+    inputBox.readInput();
   }
 
-  // 预设编辑器
-  async function showPresetEditor(presetName: string): Promise<void> {
-    const preset = getPreset(presetName);
-    if (!preset) {
+  // 重命名预设:预填旧名,校验规则与新建一致(空/花括号/换行/重名)
+  function promptRenamePreset(oldName: string, retryValue?: string): void {
+    // 同 promptNewPresetName:隐藏列表,避免 screen 级 Esc 处理抢焦点
+    presetList.hide();
+
+    const inputBox = blessed.textbox({
+      parent: screen,
+      top: 'center',
+      left: 'center',
+      width: 50,
+      height: 3,
+      label: ` Rename Preset - ${oldName} `,
+      tags: true,
+      shadow: true,
+      border: { type: 'line' },
+      style: {
+        fg: overlayStyle.fg,
+        bg: overlayStyle.bg,
+        border: overlayStyle.border,
+      },
+      padding: { left: 1, right: 1 },
+      inputOnFocus: true,
+      censor: false,
+    });
+
+    // 预填旧名便于直接编辑;校验失败重试时回填上次输入
+    inputBox.setValue(retryValue ?? oldName);
+
+    inputBox.focus();
+    screen.render();
+
+    inputBox.on('submit', (value: string) => {
+      const name = value.trim();
+      // blessed readInput 是一次性的:submit 后必须销毁重建(见 promptNewPresetName)
+      inputBox.destroy();
+      if (!name) {
+        showMessage('Preset name cannot be empty.', 'error');
+        promptRenamePreset(oldName);
+        return;
+      }
+      if (/[{}\n\r]/.test(name)) {
+        showMessage('Preset name cannot contain {, } or newlines.', 'error');
+        promptRenamePreset(oldName, name);
+        return;
+      }
+      if (name !== oldName && presetExists(name)) {
+        showMessage(`Preset "${name}" already exists.`, 'error');
+        promptRenamePreset(oldName, name);
+        return;
+      }
+      if (name !== oldName) {
+        try {
+          if (!renamePreset(oldName, name)) {
+            showMessage(`Failed to rename preset "${oldName}".`, 'error');
+            showEditPresetList();
+            return;
+          }
+        } catch (err) {
+          showMessage(`Failed to rename preset: ${(err as Error).message}`, 'error');
+          showEditPresetList();
+          return;
+        }
+        showMessage(`Preset renamed: ${oldName} → ${name}`, 'success');
+      }
+      showEditPresetList();
+    });
+
+    inputBox.on('cancel', () => {
+      inputBox.destroy();
+      showEditPresetList();
+      screen.render();
+    });
+
+    inputBox.readInput();
+  }
+
+  // Step 2: 选择模型(编辑器内模型只读,创建时先选定,与下载生成预设一样存绝对路径)
+  function showNewPresetModelPicker(name: string): void {
+    loadModels();
+    if (models.length === 0) {
+      showMessage('No models found. Configure models directory first.', 'error');
+      restorePresetListView();
+      return;
+    }
+
+    const overlayHeight = Math.min(models.length + 4, 20);
+    const overlay = blessed.box({
+      parent: screen,
+      top: 'center',
+      left: 'center',
+      width: 70,
+      height: overlayHeight,
+      label: ` Select Model - ${name} `,
+      tags: true,
+      shadow: true,
+      border: { type: 'line' },
+      style: {
+        fg: overlayStyle.fg,
+        bg: overlayStyle.bg,
+        border: overlayStyle.border,
+      },
+    });
+
+    const picker = blessed.list({
+      parent: overlay,
+      top: 0,
+      left: 1,
+      right: 1,
+      bottom: 1,
+      keys: true,
+      vi: true,
+      mouse: true,
+      tags: true,
+      style: {
+        fg: overlayStyle.fg,
+        bg: overlayStyle.bg,
+        selected: overlayStyle.selected,
+      },
+      items: models.map(m => ` ${basename(m.path)}${m.mmproj ? ` {${theme.info}-fg}[Vision]{/}` : ''}`),
+    });
+
+    picker.on('select', async (_item, index) => {
+      if (index < 0 || index >= models.length) return;
+      const model = models[index];
+      overlay.destroy();
+      screen.render();
+      await showPresetEditor(name, model.path);
+    });
+
+    picker.on('keypress', (_ch: string, key: any) => {
+      // 元素级(原因见 openDownloadManager 注释):Element.key() 全局泄漏
+      if (key && key.name !== 'escape') return;
+      overlay.destroy();
+      restorePresetListView();
+      screen.render();
+    });
+
+    picker.focus();
+    screen.render();
+  }
+
+  // 预设编辑器(newPresetModel 传入时为创建模式:以全局默认值为底稿)
+  async function showPresetEditor(presetName: string, newPresetModel?: string): Promise<void> {
+    const config = getExpandedConfig();
+    const existingPreset = getPreset(presetName);
+    if (!existingPreset && newPresetModel === undefined) {
       showMessage(`Preset "${presetName}" not found.`, 'error');
       hideSubLists();
       return;
@@ -1085,6 +1464,19 @@ export function createTUI(): void {
 
     // 隐藏 presetList 防止键盘事件冲突
     presetList.hide();
+
+    // 创建模式:合成带配置默认值的底稿,与既有预设共用同一套 editState 初始化/保存路径
+    const preset: Preset = existingPreset ?? {
+      name: presetName,
+      model: newPresetModel!,
+      ctxSize: config.defaultCtxSize,
+      gpuLayers: config.defaultGpuLayers,
+      host: config.defaultHost,
+      port: config.defaultPort,
+      jinja: true,
+      flashAttn: 'auto',
+      reasoningBudget: -1,
+    };
 
     // 编辑状态
     let editState = {
@@ -1106,25 +1498,38 @@ export function createTUI(): void {
       reasoningBudget: preset.reasoningBudget,
       jinja: preset.jinja,
       flashAttn: preset.flashAttn,
+      specType: preset.specType || '',
+      slotSave: !!preset.slotSavePath,
     };
 
-    const config = getExpandedConfig();
     const normalizedModelsDir = config.modelsDir.replace(/\/+$/, '');
     const presetPath = preset.model;
-    let modelDir = getModelDir(config.modelsDir, inferModelIdFromPath(preset.model, config.modelsDir));
+    let modelDir: string;
     if (presetPath && presetPath.startsWith('/') && !presetPath.startsWith(normalizedModelsDir + '/')) {
+      // 绝对路径在 modelsDir 之外：直接使用其所在目录
       modelDir = dirname(presetPath);
+    } else {
+      try {
+        modelDir = getModelDir(config.modelsDir, inferModelIdFromPath(preset.model, config.modelsDir));
+      } catch {
+        // 非 org/repo 结构 (如模型直接放在 modelsDir 根下)：回退到模型所在目录
+        modelDir = dirname(presetPath);
+      }
     }
-    const templateOptions = getChatTemplateOptions(modelDir, join(CONFIG_DIR, 'templates'));
+    const templateOptions = getChatTemplateOptions(modelDir, join(getConfigDir(), 'templates'));
 
-    // 创建编辑对话框
+    // 创建编辑对话框(高度自适应终端,超出可滚动:18 个字段 + Model 行 + 帮助行在 height:21 下会截断尾部字段)
     const editor = blessed.box({
       parent: screen,
       top: 'center',
       left: 'center',
       width: 60,
-      height: 20,
-      label: ` Edit: ${presetName} `,
+      height: Math.min(24, (screen.height as number) - 2),
+      scrollable: true,
+      alwaysScroll: true,
+      keys: true,
+      mouse: true,
+      label: ` ${existingPreset ? 'Edit' : 'New'}: ${presetName} `,
       tags: true,
       shadow: true,
       border: { type: 'line' },
@@ -1138,8 +1543,8 @@ export function createTUI(): void {
 
     // 当前选中的字段
     let selectedField = 0;
-    const fields = ['ctxSize', 'gpuLayers', 'tensorSplit', 'useVision', 'fit', 'batchSize', 'threadsBatch', 'cachePrompt', 'cacheReuse', 'kvCacheType', 'chatTemplate', 'port', 'host', 'reasoningBudget', 'jinja', 'flashAttn'];
-    const fieldLabels = ['Context Size', 'GPU Layers', 'Tensor Split', 'Vision', 'Fit', 'Batch Size', 'Threads Batch', 'Cache Prompt', 'Cache Reuse', 'KV Cache', 'Chat Template', 'Port', 'Host', 'Thinking', 'Jinja', 'Flash Attention'];
+    const fields = ['ctxSize', 'gpuLayers', 'tensorSplit', 'useVision', 'fit', 'batchSize', 'threadsBatch', 'cachePrompt', 'cacheReuse', 'kvCacheType', 'chatTemplate', 'port', 'host', 'reasoningBudget', 'jinja', 'flashAttn', 'specType', 'slotSave'];
+    const fieldLabels = ['Context Size', 'GPU Layers', 'Tensor Split', 'Vision', 'Fit', 'Batch Size', 'Threads Batch', 'Cache Prompt', 'Cache Reuse', 'KV Cache', 'Chat Template', 'Port', 'Host', 'Thinking', 'Jinja', 'Flash Attention', 'Spec Type', 'Slot Save'];
 
     function renderEditor() {
       let content = `{${theme.muted}-fg}Model:{/} ${editState.model}\n\n`;
@@ -1199,6 +1604,12 @@ export function createTUI(): void {
           case 'flashAttn':
             value = editState.flashAttn;
             break;
+          case 'specType':
+            value = editState.specType ? editState.specType : '{yellow-fg}Off{/}';
+            break;
+          case 'slotSave':
+            value = editState.slotSave ? '{green-fg}On{/}' : '{yellow-fg}Off{/}';
+            break;
           default:
             value = '';
         }
@@ -1211,6 +1622,15 @@ export function createTUI(): void {
       content += `\n{${theme.muted}-fg}↑↓ Select | ←→ Change | Enter Save | Esc Cancel{/}`;
       
       editor.setContent(content);
+      // 选中行滚入可视区(内容布局:Model 行 + 空行 + 字段行 + 空行 + 帮助行)
+      const selectedRow = selectedField + 2;
+      const visibleRows = (editor.height as number) - 3; // 边框 2 + padding top 1
+      const scroll = editor.getScroll();
+      if (selectedRow < scroll) {
+        editor.setScroll(selectedRow);
+      } else if (selectedRow >= scroll + visibleRows) {
+        editor.setScroll(selectedRow - visibleRows + 1);
+      }
       screen.render();
     }
 
@@ -1218,7 +1638,8 @@ export function createTUI(): void {
       const field = fields[selectedField];
         switch (field) {
           case 'ctxSize':
-            const ctxSteps = [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072];
+            // 'auto' 排在档位末尾:保存为字符串,启动时配合 --fit 自动调整上下文
+            const ctxSteps: (number | 'auto')[] = [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 'auto'];
             const ctxIdx = ctxSteps.indexOf(editState.ctxSize);
             const newCtxIdx = Math.max(0, Math.min(ctxSteps.length - 1, ctxIdx + delta));
             editState.ctxSize = ctxSteps[newCtxIdx];
@@ -1294,11 +1715,22 @@ export function createTUI(): void {
           const modeIdx = modes.indexOf(editState.flashAttn);
           editState.flashAttn = modes[(modeIdx + 1) % modes.length];
           break;
+        case 'specType':
+          // '' = 关闭;'none' 与缺省等价,不列入循环
+          const specTypes = ['', 'draft-simple', 'draft-eagle3', 'draft-mtp', 'draft-dflash', 'draft-dspark', 'ngram-simple', 'ngram-map-k', 'ngram-map-k4v', 'ngram-mod', 'ngram-cache'];
+          const specIdx = specTypes.indexOf(editState.specType);
+          editState.specType = specTypes[(specIdx + 1) % specTypes.length];
+          break;
+        case 'slotSave':
+          editState.slotSave = !editState.slotSave;
+          break;
       }
       renderEditor();
     }
 
-    const keyHandler = (ch: string, key: any) => {
+    const keyHandler = (_ch: string, key: any) => {
+      // 模态确认框打开时,按键不穿透到编辑器
+      if (isModalOpen()) return;
       if (key.name === 'up') {
         selectedField = (selectedField - 1 + fields.length) % fields.length;
         renderEditor();
@@ -1334,9 +1766,24 @@ export function createTUI(): void {
           jinja: editState.jinja,
           flashAttn: editState.flashAttn,
           reasoningBudget: editState.reasoningBudget,
+          specType: editState.specType || undefined, // '' 表示关闭,不写入预设
+          // 编辑器不提供 specModel 字段,但预设里手工配置的(非 mtp- 命名 draft 模块的
+          // 覆盖通道)必须原样保留,不能因逐字段重建而丢失
+          specModel: preset.specModel || undefined,
+          // On 时优先保留已有的自定义路径(编辑器不管理具体目录,与 specModel 同理);
+          // 没有时才写默认目录;Off 时为 undefined,JSON.stringify 会丢弃该键(即禁用)
+          slotSavePath: editState.slotSave ? (preset.slotSavePath || getDefaultSlotSavePath()) : undefined,
         };
         
-        savePreset(updatedPreset);
+        // 磁盘满/权限不足时 writeJsonAtomic 会抛错,不能让其穿透 blessed 按键派发杀死进程;
+        // 编辑器已销毁,失败时回到主界面即可
+        try {
+          savePreset(updatedPreset);
+        } catch (err) {
+          showMessage(`Failed to save preset: ${(err as Error).message}`, 'error');
+          hideSubLists();
+          return;
+        }
         showMessage(`Preset "${presetName}" saved.`, 'success');
         loadPresetsList();
         hideSubLists();
@@ -1354,14 +1801,6 @@ export function createTUI(): void {
 
   // ========== 模型下载功能 ==========
   
-  // 下载界面通用样式 - 中灰半透明背景，亮色文字
-  const downloadStyle = {
-    fg: '#e0e0e0',      // 亮色文字
-    bg: '#2a2a2a',      // 中灰背景
-    border: { fg: theme.primary },
-    selected: { bg: theme.primary, fg: '#ffffff', bold: true },
-  };
-
   // 浮层统一样式
   const overlayStyle = {
     fg: theme.text,
@@ -1459,7 +1898,7 @@ export function createTUI(): void {
   }
 
   async function showQuantizationSelector(repo: HFRepo): Promise<void> {
-    const systemInfo = getSystemInfo();
+    const systemInfo = await getSystemInfo();
     const quantizations = getAvailableQuantizations(repo);
     
     if (quantizations.length === 0) {
@@ -1515,7 +1954,7 @@ export function createTUI(): void {
       },
     });
 
-    const infoBox = blessed.box({
+    blessed.box({
       parent: overlay,
       top: 0,
       left: 1,
@@ -1546,7 +1985,7 @@ export function createTUI(): void {
       items: renderQuantItems(),
     });
 
-    const helpBox = blessed.box({
+    blessed.box({
       parent: overlay,
       bottom: 0,
       left: 1,
@@ -1562,36 +2001,44 @@ export function createTUI(): void {
     selectBox.focus();
     screen.render();
 
-    selectBox.key(['space'], () => {
-      const idx = (selectBox as any).selected;
-      if (idx >= 0 && idx < estimates.length) {
-        if (selectedQuants.has(idx)) {
-          selectedQuants.delete(idx);
-        } else {
-          selectedQuants.add(idx);
-        }
-        const currentSelection = (selectBox as any).selected;
-        selectBox.setItems(renderQuantItems());
-        selectBox.select(currentSelection);
-        screen.render();
-      }
-    });
+    // 元素级 on('keypress'):仅焦点在该列表时触发,且随 overlay 销毁自动失效;
+    // Element.key() 是程序级全局注册,浮层销毁后仍累积触发(已造成按键串扰)
+    selectBox.on('keypress', async (_ch: string, key: any) => {
+      if (isModalOpen()) return;
+      const name = key && key.name;
 
-    selectBox.key(['enter'], async () => {
-      if (selectedQuants.size === 0) {
-        showMessage('Please select at least one quantization.', 'error');
+      if (name === 'space') {
+        const idx = (selectBox as any).selected;
+        if (idx >= 0 && idx < estimates.length) {
+          if (selectedQuants.has(idx)) {
+            selectedQuants.delete(idx);
+          } else {
+            selectedQuants.add(idx);
+          }
+          const currentSelection = (selectBox as any).selected;
+          selectBox.setItems(renderQuantItems());
+          selectBox.select(currentSelection);
+          screen.render();
+        }
         return;
       }
 
-      overlay.destroy();
-      const selectedEstimates = Array.from(selectedQuants).map(i => estimates[i]);
-      await showFileSelector(repo, selectedEstimates, systemInfo);
-    });
+      if (name === 'enter') {
+        if (selectedQuants.size === 0) {
+          showMessage('Please select at least one quantization.', 'error');
+          return;
+        }
+        overlay.destroy();
+        const selectedEstimates = Array.from(selectedQuants).map(i => estimates[i]);
+        await showFileSelector(repo, selectedEstimates, systemInfo);
+        return;
+      }
 
-    selectBox.key(['escape'], () => {
-      overlay.destroy();
-      menuBox.focus();
-      screen.render();
+      if (name === 'escape') {
+        overlay.destroy();
+        menuBox.focus();
+        screen.render();
+      }
     });
   }
 
@@ -1646,7 +2093,7 @@ export function createTUI(): void {
       },
     });
 
-    const infoBox = blessed.box({
+    blessed.box({
       parent: overlay,
       top: 0,
       left: 1,
@@ -1676,7 +2123,7 @@ export function createTUI(): void {
       items: renderFileItems(),
     });
 
-    const helpBox = blessed.box({
+    blessed.box({
       parent: overlay,
       bottom: 0,
       left: 1,
@@ -1691,35 +2138,42 @@ export function createTUI(): void {
     fileList.focus();
     screen.render();
 
-    fileList.key(['space'], () => {
-      const idx = (fileList as any).selected;
-      if (idx >= 0 && idx < allFiles.length) {
-        if (selectedFiles.has(idx)) {
-          selectedFiles.delete(idx);
-        } else {
-          selectedFiles.add(idx);
-        }
-        const currentSelection = (fileList as any).selected;
-        fileList.setItems(renderFileItems());
-        fileList.select(currentSelection);
-        screen.render();
-      }
-    });
+    // 元素级按键(原因见 showQuantizationSelector 注释)
+    fileList.on('keypress', async (_ch: string, key: any) => {
+      if (isModalOpen()) return;
+      const name = key && key.name;
 
-    fileList.key(['enter'], async () => {
-      if (selectedFiles.size === 0) {
-        showMessage('Please select at least one file.', 'error');
+      if (name === 'space') {
+        const idx = (fileList as any).selected;
+        if (idx >= 0 && idx < allFiles.length) {
+          if (selectedFiles.has(idx)) {
+            selectedFiles.delete(idx);
+          } else {
+            selectedFiles.add(idx);
+          }
+          const currentSelection = (fileList as any).selected;
+          fileList.setItems(renderFileItems());
+          fileList.select(currentSelection);
+          screen.render();
+        }
         return;
       }
 
-      const filesToDownload = Array.from(selectedFiles).map(i => allFiles[i].file);
-      overlay.destroy();
-      await startDownloadProcess(repo, filesToDownload, estimates, systemInfo);
-    });
+      if (name === 'enter') {
+        if (selectedFiles.size === 0) {
+          showMessage('Please select at least one file.', 'error');
+          return;
+        }
+        const filesToDownload = Array.from(selectedFiles).map(i => allFiles[i].file);
+        overlay.destroy();
+        await startDownloadProcess(repo, filesToDownload, estimates, systemInfo);
+        return;
+      }
 
-    fileList.key(['escape'], () => {
-      overlay.destroy();
-      showQuantizationSelector(repo);
+      if (name === 'escape') {
+        overlay.destroy();
+        showQuantizationSelector(repo);
+      }
     });
   }
 
@@ -1728,7 +2182,7 @@ export function createTUI(): void {
     files: HFFile[],
     estimates: QuantizationEstimate[],
     systemInfo: SystemInfo,
-    managerOverride?: DownloadManager
+    managerOverride?: DownloadManagerLike
   ): Promise<void> {
     const config = getExpandedConfig();
     const modelDir = getModelDir(config.modelsDir, repo.modelId);
@@ -1743,8 +2197,8 @@ export function createTUI(): void {
       return;
     }
 
-    // 使用 Download Manager 显示进度
-    const manager = managerOverride || new DownloadManager({ maxConcurrent: 3 });
+    // 使用 Download Manager 显示进度(内置/aria2 后端由工厂按配置选择)
+    const manager = managerOverride || createDownloadManager({ maxConcurrent: 3 });
 
     if (!managerOverride) {
       // 添加下载任务
@@ -1783,6 +2237,7 @@ export function createTUI(): void {
         meta: task.meta,
         downloadedBytes: task.downloadedBytes,
         status: task.status,
+        speed: task.speed,
       });
       downloadManagerListKeys.push(key);
     }
@@ -1794,6 +2249,18 @@ export function createTUI(): void {
     // 开始下载
     try {
       await manager.start();
+
+      // 有任务失败时不能走完成路径:否则会给缺文件的模型生成预设并提示成功
+      // (2026-08-19 实机案例:主模型 94% 失败,仍生成预设 + "Download completed")
+      const failedTasks = manager.getTasks().filter(t => t.status === 'failed');
+      if (failedTasks.length > 0) {
+        setActiveDownloadManager(null);
+        const detail = failedTasks
+          .map(t => `${t.filename}: ${t.error || 'unknown error'}`)
+          .join('; ');
+        showMessage(`Download incomplete (${detail}). Resume in Download Manager.`, 'error');
+        return;
+      }
 
       // 下载完成，开始校验
       const completedTasks = manager.getTasks().filter(t => t.status === 'completed');
@@ -1807,7 +2274,7 @@ export function createTUI(): void {
           showMessage(verifyContent.trim(), 'info');
           
           const result = await verifySha256(task.destPath, task.expectedSha256, (p) => {
-            const bar = createDownloadBar(p.percent, 30);
+            const bar = createProgressBar(p.percent, 30, theme, false);
             showMessage(`${task.filename} ${p.percent}% [${bar}]`, 'info');
           });
           
@@ -1903,24 +2370,6 @@ export function createTUI(): void {
   }
 
   function showDownloadComplete(presetNameList: string[]): void {
-    const dialog = blessed.box({
-      parent: screen,
-      top: 'center',
-      left: 'center',
-      width: 60,
-      height: Math.min(presetNameList.length + 8, 15),
-      label: ' Download Complete ',
-      tags: true,
-      shadow: true,
-      border: { type: 'line' },
-      style: {
-        fg: overlayStyle.fg,
-        bg: overlayStyle.bg,
-        border: { fg: theme.success },
-      },
-      padding: { left: 2, right: 2, top: 1 },
-    });
-
     let content = `{bold}{#87d787-fg}Download completed successfully!{/}{/bold}\n\n`;
     content += `{#ffffff-fg}Created preset(s):{/}\n`;
     presetNameList.forEach(name => {
@@ -1928,32 +2377,30 @@ export function createTUI(): void {
     });
     content += `\n{#585858-fg}[Enter] Close{/}`;
 
-    dialog.setContent(content);
-    screen.render();
-
-    const onKeyPress = (ch: string, key: any) => {
-      if (key && (key.name === 'enter' || key.name === 'escape')) {
-        screen.removeListener('keypress', onKeyPress);
-        dialog.destroy();
-        
-        loadPresetsList();
-        loadModels();
-        showMessage(`Preset(s) ready: ${presetNameList.join(', ')}`, 'success');
-        screen.render();
-      }
+    // Enter 与 Esc 都执行同一关闭动作
+    const close = () => {
+      loadPresetsList();
+      loadModels();
+      showMessage(`Preset(s) ready: ${presetNameList.join(', ')}`, 'success');
     };
 
-    screen.on('keypress', onKeyPress);
+    const opened = confirmDialog(screen, content, close, {
+      label: ' Download Complete ',
+      width: 60,
+      height: Math.min(presetNameList.length + 8, 15),
+      borderColor: theme.success,
+      fg: overlayStyle.fg,
+      bg: overlayStyle.bg,
+      confirmKeys: ['enter'],
+      cancelKeys: ['escape'],
+      onCancel: close,
+    });
+    // 已有模态框打开时弹窗被跳过,但刷新副作用(preset/模型列表、提示)仍要执行
+    if (!opened) close();
   }
 
   function delay(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
-  }
-
-  function createDownloadBar(percent: number, width: number): string {
-    const filled = Math.round((percent / 100) * width);
-    const empty = width - filled;
-    return `{${theme.success}-fg}${'█'.repeat(filled)}{/}{${theme.surface2}-fg}${'░'.repeat(empty)}{/}`;
   }
 
   function getChatTemplateOptions(modelDir: string, globalTemplatesDir: string): string[] {
@@ -1998,7 +2445,7 @@ export function createTUI(): void {
       const total = meta.expectedSize || 0;
       const downloaded = entry.downloadedBytes || 0;
       const percent = total > 0 ? Math.round((downloaded / total) * 100) : 0;
-      const bar = createDownloadBar(percent, 20);
+      const bar = createProgressBar(percent, 20, theme, false);
       const statusLabel = entry.status === 'paused'
         ? `{#d7af5f-fg}Paused{/}`
         : entry.status === 'failed'
@@ -2008,7 +2455,11 @@ export function createTUI(): void {
         : `{#5fafff-fg}Running{/}`;
 
       items.push(`${checked} {#ffffff-fg}${meta.modelId}{/} {#585858-fg}${meta.filename}{/} ${statusLabel}`);
-      items.push(`  [${bar}] {#5fafff-fg}${formatSize(downloaded)} / ${formatSize(total)} ({percent}%) {/}`.replace('{percent}', String(percent)));
+      // 仅下载中显示实时速度;暂停/失败/完成时 speed 为陈旧值或 0,不展示
+      const speedLabel = entry.status === 'downloading'
+        ? ` {#87d787-fg}${formatSize(entry.speed)}/s{/}`
+        : '';
+      items.push(`  [${bar}] {#5fafff-fg}${formatSize(downloaded)} / ${formatSize(total)} (${percent}%){/}${speedLabel}`);
     }
 
     if (items.length === 0) {
@@ -2024,7 +2475,12 @@ export function createTUI(): void {
     screen.render();
   }
 
-  function setActiveDownloadManager(manager: DownloadManager | null): void {
+  function setActiveDownloadManager(manager: DownloadManagerLike | null): void {
+    // 替换/清空 manager 前先摘掉旧 progress 监听,避免陈旧闭包累积并触发渲染
+    if (activeDownloadManager && activeDownloadProgressHandler) {
+      activeDownloadManager.off('progress', activeDownloadProgressHandler);
+      activeDownloadProgressHandler = null;
+    }
     activeDownloadManager = manager;
     activeDownloadPaused = false;
     activeDownloadSnapshot.clear();
@@ -2034,6 +2490,10 @@ export function createTUI(): void {
 
     if (!manager) {
       updateDownloadManagerList();
+      // 下载到达终态(完成/失败/取消),.meta.json 可能已增删,
+      // 置失效并做一次全量状态刷新,保证 "⚠ N incomplete" 角标及时更新
+      invalidateIncompleteScanCache();
+      updateStatus();
       return;
     }
 
@@ -2046,12 +2506,13 @@ export function createTUI(): void {
         meta: task.meta,
         downloadedBytes: task.downloadedBytes,
         status: task.status,
+        speed: task.speed,
       });
       downloadManagerListKeys.push(key);
       activeDownloadTaskIds.set(key, task.id);
     }
 
-    manager.on('progress', (progress) => {
+    activeDownloadProgressHandler = (progress: DownloadProgress) => {
       for (const task of progress.tasks) {
         if (!task.meta) continue;
         const key = buildDownloadKey(task.meta.modelId, task.filename);
@@ -2059,12 +2520,15 @@ export function createTUI(): void {
         if (entry) {
           entry.downloadedBytes = task.downloadedBytes;
           entry.status = task.status;
+          entry.speed = task.speed;
         }
         activeDownloadTaskIds.set(key, task.id);
       }
       updateDownloadManagerList();
-      updateStatus();
-    });
+      // 轻量刷新状态栏下载段,不做全量 PID/配置/磁盘扫描
+      updateDownloadStatusSegment();
+    };
+    manager.on('progress', activeDownloadProgressHandler);
 
     updateDownloadManagerList();
   }
@@ -2078,6 +2542,8 @@ export function createTUI(): void {
     if (!activeDownloadManager) {
       const config = getExpandedConfig();
       const incomplete = scanIncompleteDownloads(config.modelsDir);
+      // 打开下载管理器时已做过全量扫描,顺手刷新状态栏计数缓存
+      incompleteScanCache = { time: Date.now(), count: incomplete.length };
       activeDownloadSnapshot.clear();
       downloadManagerListKeys = [];
       activeDownloadTaskIds.clear();
@@ -2088,6 +2554,7 @@ export function createTUI(): void {
           meta: item.meta,
           downloadedBytes: item.downloadedBytes,
           status: 'pending',
+          speed: 0, // 磁盘扫描出的未完成任务不在跑,无速度
         });
         downloadManagerListKeys.push(key);
       }
@@ -2141,14 +2608,14 @@ export function createTUI(): void {
       items: [],
     });
 
-    downloadManagerHelp = blessed.box({
+    blessed.box({
       parent: downloadManagerOverlay,
       bottom: 0,
       left: 1,
       right: 1,
       height: 2,
       tags: true,
-      content: `{center}{${theme.secondary}-fg}Space{/} Select {${theme.muted}-fg}│{/} {${theme.secondary}-fg}A{/} All {${theme.muted}-fg}│{/} {${theme.secondary}-fg}P{/} Pause {${theme.muted}-fg}│{/} {${theme.secondary}-fg}D{/} Delete {${theme.muted}-fg}│{/} {${theme.secondary}-fg}Esc{/} Back{/center}`,
+      content: `{center}{${theme.secondary}-fg}Space{/} Select {${theme.muted}-fg}│{/} {${theme.secondary}-fg}R/Enter{/} Resume {${theme.muted}-fg}│{/} {${theme.secondary}-fg}P{/} Pause {${theme.muted}-fg}│{/} {${theme.secondary}-fg}D{/} Delete {${theme.muted}-fg}│{/} {${theme.secondary}-fg}Esc{/} Back{/center}`,
       style: { fg: overlayStyle.fg, bg: overlayStyle.bg },
     });
 
@@ -2156,7 +2623,23 @@ export function createTUI(): void {
     downloadManagerList.select(0);
     downloadManagerList.focus();
 
-    downloadManagerList.key(['space'], () => {
+    // 元素级按键分发:Element.key() 是程序级全局注册,overlay 销毁后处理器
+    // 仍累积在 program 上反复触发(按键串扰的根源);on('keypress') 仅当
+    // 焦点在该列表时触发,且随列表销毁自动失效
+    const dmKeyHandlers: Record<string, (() => void | Promise<void>)[]> = {};
+    const dmKey = (names: string, handler: () => void | Promise<void>) => {
+      for (const n of names.split(',')) {
+        (dmKeyHandlers[n.trim()] ||= []).push(handler);
+      }
+    };
+    downloadManagerList.on('keypress', (_ch: string, key: any) => {
+      const handlers = key && dmKeyHandlers[key.name];
+      if (!handlers) return;
+      for (const h of handlers) h();
+    });
+
+    dmKey('space', () => {
+      if (isModalOpen()) return;
       const idx = (downloadManagerList as any).selected;
       const keyIndex = Math.floor(idx / 2);
       const key = downloadManagerListKeys[keyIndex];
@@ -2169,7 +2652,8 @@ export function createTUI(): void {
       updateDownloadManagerList();
     });
 
-    downloadManagerList.key(['a'], () => {
+    dmKey('a', () => {
+      if (isModalOpen()) return;
       if (downloadManagerSelectedKeys.size === downloadManagerListKeys.length) {
         downloadManagerSelectedKeys.clear();
       } else {
@@ -2178,7 +2662,8 @@ export function createTUI(): void {
       updateDownloadManagerList();
     });
 
-    downloadManagerList.key(['p'], () => {
+    dmKey('p', () => {
+      if (isModalOpen()) return;
       if (!activeDownloadManager) return;
       if (activeDownloadPaused) {
         activeDownloadPaused = false;
@@ -2190,7 +2675,8 @@ export function createTUI(): void {
       updateDownloadManagerList();
     });
 
-    downloadManagerList.key(['d'], async () => {
+    dmKey('d', async () => {
+      if (isModalOpen()) return;
       if (downloadManagerSelectedKeys.size === 0) {
         showMessage('Select at least one download to delete.', 'error');
         return;
@@ -2212,27 +2698,47 @@ export function createTUI(): void {
       for (const key of Array.from(downloadManagerSelectedKeys)) {
         const entry = activeDownloadSnapshot.get(key);
         if (!entry) continue;
-        const metaPath = getModelStoragePath(config.modelsDir, entry.meta.modelId, entry.meta.filename) + '.meta.json';
-        const partialPath = getModelStoragePath(config.modelsDir, entry.meta.modelId, entry.meta.filename) + '.partial';
-        deletePartialFile(partialPath);
-        deleteDownloadMeta(metaPath);
-        cleanupEmptyDirs(config.modelsDir, partialPath);
+        try {
+          const metaPath = getModelStoragePath(config.modelsDir, entry.meta.modelId, entry.meta.filename) + '.meta.json';
+          const partialPath = getModelStoragePath(config.modelsDir, entry.meta.modelId, entry.meta.filename) + '.partial';
+          deletePartialFile(partialPath);
+          deleteDownloadMeta(metaPath);
+          // aria2 后端的控制文件(若存在)一并清掉,避免残留孤儿
+          deletePartialFile(partialPath + '.aria2');
+          cleanupEmptyDirs(config.modelsDir, partialPath);
+        } catch (err: any) {
+          // meta 损坏 (如手改 modelId) 不应使 TUI 崩溃
+          showMessage(`Failed to delete partial download: ${err?.message || err}`, 'error');
+          continue;
+        }
         activeDownloadSnapshot.delete(key);
         activeDownloadTaskIds.delete(key);
       }
       downloadManagerSelectedKeys.clear();
       downloadManagerListKeys = Array.from(activeDownloadSnapshot.keys());
+      // 删除后未完成下载数量已变,下次状态栏刷新需重扫
+      invalidateIncompleteScanCache();
       updateDownloadManagerList();
     });
 
-    downloadManagerList.key(['r', 'enter'], async () => {
+    dmKey('r,enter', async () => {
+      if (isModalOpen()) return;
       if (activeDownloadManager) {
+        // 暂停中按 R/Enter:直接恢复,而不是只提示"已在下载"
+        if (activeDownloadPaused) {
+          activeDownloadPaused = false;
+          activeDownloadManager.resume();
+          updateDownloadManagerList();
+          return;
+        }
         showMessage('Download already running.', 'info');
         return;
       }
 
       const config = getExpandedConfig();
       const incomplete = scanIncompleteDownloads(config.modelsDir);
+      // 续传前已做过全量扫描,顺手刷新状态栏计数缓存
+      incompleteScanCache = { time: Date.now(), count: incomplete.length };
       const selectedMeta = Array.from(downloadManagerSelectedKeys);
       if (selectedMeta.length === 0) {
         showMessage('Select at least one download to resume.', 'error');
@@ -2245,7 +2751,18 @@ export function createTUI(): void {
         return;
       }
 
-      const manager = new DownloadManager({ maxConcurrent: 3 });
+      // meta 损坏 (如手改 modelId) 不应使 TUI 崩溃:续传前先校验 modelId 可解析,
+      // 否则 startDownloadProcess 里的 getModelDir 会在 async 回调中抛未处理异常
+      for (const item of items) {
+        try {
+          getModelDir(config.modelsDir, item.meta.modelId);
+        } catch (err: any) {
+          showMessage(`Failed to resume download: ${err?.message || err}`, 'error');
+          return;
+        }
+      }
+
+      const manager = createDownloadManager({ maxConcurrent: 3 });
       for (const item of items) {
         manager.addTask({
           url: item.meta.url,
@@ -2272,17 +2789,19 @@ export function createTUI(): void {
         isMainModel: !i.meta.isVision,
         quantization: i.meta.quantization,
       }));
-      const systemInfo = getSystemInfo();
+      const systemInfo = await getSystemInfo();
       const fakeEstimates: QuantizationEstimate[] = [];
 
       await startDownloadProcess(fakeRepo, files, fakeEstimates, systemInfo, manager);
     });
 
-    downloadManagerList.key(['h'], () => {
+    dmKey('h', () => {
+      if (isModalOpen()) return;
       hideDownloadManager();
     });
 
-    downloadManagerList.key(['escape'], () => {
+    dmKey('escape', () => {
+      if (isModalOpen()) return;
       hideDownloadManager();
     });
 
@@ -2295,7 +2814,6 @@ export function createTUI(): void {
     downloadManagerOverlay = null;
     downloadManagerList = null;
     downloadManagerInfo = null;
-    downloadManagerHelp = null;
     downloadManagerVisible = false;
     menuBox.focus();
     screen.render();
@@ -2307,42 +2825,24 @@ export function createTUI(): void {
 
   async function confirmDeleteDownloads(count: number): Promise<boolean> {
     return new Promise((resolve) => {
-      const dialog = blessed.box({
-        parent: screen,
-        top: 'center',
-        left: 'center',
-        width: 60,
-        height: 8,
-        label: ' Confirm Delete ',
-        tags: true,
-        shadow: true,
-        border: { type: 'line' },
-        style: {
-          fg: overlayStyle.fg,
-          bg: overlayStyle.bg,
-          border: { fg: theme.warning },
-        },
-        padding: { left: 2, right: 2, top: 1 },
-      });
-
-      dialog.setContent(
+      const opened = confirmDialog(
+        screen,
         `{#d7af5f-fg}Delete ${count} incomplete download(s)?{/}\n\n` +
         `{#585858-fg}This will remove .partial and metadata files.{/}\n\n` +
-        `{#87d787-fg}[Y]{/} Yes  {#d75f5f-fg}[N]{/} No`
+        `{#87d787-fg}[Y]{/} Yes  {#d75f5f-fg}[N]{/} No`,
+        () => resolve(true),
+        {
+          label: ' Confirm Delete ',
+          width: 60,
+          height: 8,
+          borderColor: theme.warning,
+          fg: overlayStyle.fg,
+          bg: overlayStyle.bg,
+          onCancel: () => resolve(false),
+        },
       );
-
-      screen.render();
-
-      const onKeyPress = (ch: string, key: any) => {
-        if (key && (key.name === 'y' || key.name === 'n' || key.name === 'escape')) {
-          screen.removeListener('keypress', onKeyPress);
-          dialog.destroy();
-          resolve(key.name === 'y');
-          screen.render();
-        }
-      };
-
-      screen.on('keypress', onKeyPress);
+      // 已有模态框打开:不叠加,视为取消
+      if (!opened) resolve(false);
     });
   }
 
@@ -2353,82 +2853,64 @@ export function createTUI(): void {
   // 退出确认对话框
   async function handleExit(): Promise<void> {
     const status = getServerStatus();
-    
-    if (status.running || proxyServer) {
-      // 创建确认对话框
-      const dialog = blessed.box({
-        parent: screen,
-        top: 'center',
-        left: 'center',
-        width: 50,
-        height: 9,
-        label: ' Exit ',
-        tags: true,
-        shadow: true,
-        border: { type: 'line' },
-        style: {
-          fg: theme.text,
-          bg: theme.surface0,
-          border: { fg: theme.warning },
-        },
-        padding: { left: 2, right: 2, top: 1 },
-      });
 
-      dialog.setContent(
+    if (status.running || proxyServer) {
+      confirmDialog(
+        screen,
         `{bold}Server is still running!{/bold}\n\n` +
         `{${theme.secondary}-fg}[Y]{/} Stop server and exit\n` +
         `{${theme.secondary}-fg}[N]{/} Exit without stopping\n` +
-        `{${theme.secondary}-fg}[Esc]{/} Cancel`
+        `{${theme.secondary}-fg}[Esc]{/} Cancel`,
+        async () => {
+          showMessage('Stopping server before exit...', 'info');
+          stopProxy();
+          try {
+            await stopServer();
+          } catch {}
+          cleanup();
+          process.exit(0);
+        },
+        {
+          label: ' Exit ',
+          width: 50,
+          height: 9,
+          borderColor: theme.warning,
+          fg: theme.text,
+          bg: theme.surface0,
+          // 三选一:n = 直接退出(停代理/ watcher,不停服务器),Esc = 取消
+          onNo: () => {
+            cleanup();
+            process.exit(0);
+          },
+        },
       );
-
-      screen.render();
-
-      // 使用 once 方式监听按键
-      const onKeyPress = async (ch: string, key: any) => {
-        if (key.name === 'y' || key.name === 'n' || key.name === 'escape') {
-          screen.removeListener('keypress', onKeyPress);
-          dialog.destroy();
-          
-          if (key.name === 'y') {
-            showMessage('Stopping server before exit...', 'info');
-            stopProxy();
-            try {
-              await stopServer();
-            } catch {}
-            cleanup();
-            process.exit(0);
-          } else if (key.name === 'n') {
-            cleanup();
-            process.exit(0);
-          }
-          // Escape - just close dialog and return to menu
-          screen.render();
-        }
-      };
-
-      screen.on('keypress', onKeyPress);
     } else {
       cleanup();
       process.exit(0);
     }
   }
 
-  // 清理残留进程（启动时调用）
-  function cleanupOrphanProcesses(): void {
+  // 清理残留进程（启动时调用）:端口取自配置,杀前校验确为 llama-server,
+  // 避免误杀占用同端口的其他程序(开发服务器、docker 代理等)
+  async function cleanupOrphanProcesses(): Promise<void> {
     try {
-      // 检查 8080 和 8081 端口是否被占用
-      const output = execSync('lsof -i :8080 -i :8081 -t 2>/dev/null || true', { encoding: 'utf-8' });
-      const pids = output.trim().split('\n').filter(p => p);
-      
+      const config = getExpandedConfig();
+      // llama-server 内部端口与代理对外端口(TUI/CLI 均按 defaultPort 与 defaultPort+1 配对);
+      // 只查 LISTEN 状态的 TCP 连接,避免误伤仅作为客户端连接这些端口的进程
+      const output = execSync(`lsof -iTCP:${config.defaultPort} -iTCP:${config.defaultPort + 1} -sTCP:LISTEN -t 2>/dev/null || true`, { encoding: 'utf-8' });
+      const pids = output.trim().split('\n').filter(p => p)
+        .map(p => parseInt(p, 10))
+        .filter(pid => !isNaN(pid) && isLlamaServerProcess(pid));
+
       if (pids.length > 0) {
-        showMessage(`Found ${pids.length} orphan process(es) on ports 8080/8081, cleaning up...`, 'info');
+        showMessage(`Found ${pids.length} orphan llama-server process(es) on ports ${config.defaultPort}/${config.defaultPort + 1}, cleaning up...`, 'info');
         for (const pid of pids) {
           try {
-            process.kill(parseInt(pid), 'SIGTERM');
+            process.kill(pid, 'SIGTERM');
           } catch {}
         }
-        // 等待进程终止
-        execSync('sleep 1');
+        // 等待进程终止(异步,不阻塞 UI)
+        await new Promise(r => setTimeout(r, 1000));
         showMessage('Orphan processes cleaned up.', 'success');
       }
     } catch {}
@@ -2516,7 +2998,7 @@ export function createTUI(): void {
 
   // === 事件处理 ===
 
-  menuBox.on('select', async (item, index) => {
+  menuBox.on('select', async (_item, index) => {
     switch (index) {
       case 0: // Start
         await handleStartServer();
@@ -2554,7 +3036,7 @@ export function createTUI(): void {
     }
   });
 
-  modelList.on('select', (item, index) => {
+  modelList.on('select', (_item, index) => {
     if (index >= 0 && index < models.length) {
       currentModel = models[index];
       showMessage(`Selected: ${currentModel.name}`, 'success');
@@ -2562,7 +3044,7 @@ export function createTUI(): void {
     }
   });
 
-  presetList.on('select', async (item, index) => {
+  presetList.on('select', async (_item, index) => {
     if (presetEditMode) {
       // 编辑模式：打开编辑器
       if (index >= 0 && index < presetNames.length) {
@@ -2577,16 +3059,23 @@ export function createTUI(): void {
 
   // 键盘快捷键
   screen.key(['escape'], () => {
+    // 模态框打开时静默(Esc 由对话框自身处理)
+    if (isModalOpen()) return;
     if (!modelList.hidden || !presetList.hidden) {
       hideSubLists();
     }
   });
 
   screen.key(['q', 'C-c'], async () => {
+    // 模态框打开或文本输入中(blessed textbox 读入时 _reading=true)时静默
+    if (isModalOpen() || isEditingInput(screen)) return;
     await handleExit();
   });
 
   screen.key(['r'], () => {
+    if (isModalOpen() || isEditingInput(screen)) return;
+    // 编辑模式下焦点在预设列表时,r 是"重命名"(元素级绑定),全局刷新让路
+    if (presetEditMode && screen.focused === presetList) return;
     updateStatus();
     updateInfo();
     updateLogs();
@@ -2594,6 +3083,7 @@ export function createTUI(): void {
   });
 
   screen.key(['l'], () => {
+    if (isModalOpen() || isEditingInput(screen)) return;
     logPaused = !logPaused;
     if (logPaused) {
       stopLogWatcher();
@@ -2605,6 +3095,7 @@ export function createTUI(): void {
   });
 
   screen.key(['s'], () => {
+    if (isModalOpen() || isEditingInput(screen)) return;
     if (downloadManagerVisible) {
       if (downloadManagerList) downloadManagerList.focus();
       return;
@@ -2615,8 +3106,7 @@ export function createTUI(): void {
     }
 
     try {
-      const logFile = getLogFile();
-      const dest = join(CONFIG_DIR, 'sys.log');
+      const dest = join(getConfigDir(), 'sys.log');
       const content = readLastLogs(100000);
       if (!content) {
         showMessage('No logs to save.', 'error');
@@ -2629,12 +3119,14 @@ export function createTUI(): void {
     }
   });
 
-  let focusedElement: 'menu' | 'model' | 'preset' | 'serverLog' | 'requestLog' = 'menu';
+  let focusedElement: 'menu' | 'model' | 'preset' | 'info' | 'resource' | 'serverLog' | 'requestLog' = 'menu';
   
   // 更新焦点边框高亮
   function updateFocusBorder(): void {
     // 重置所有边框
     menuBox.style.border = { fg: theme.border };
+    infoBox.style.border = { fg: theme.border };
+    resourceBox.style.border = { fg: theme.border };
     serverLogBox.style.border = { fg: theme.border };
     requestLogBox.style.border = { fg: theme.secondary };
     
@@ -2642,6 +3134,12 @@ export function createTUI(): void {
     switch (focusedElement) {
       case 'menu':
         menuBox.style.border = { fg: theme.primary };
+        break;
+      case 'info':
+        infoBox.style.border = { fg: theme.primary };
+        break;
+      case 'resource':
+        resourceBox.style.border = { fg: theme.primary };
         break;
       case 'serverLog':
         serverLogBox.style.border = { fg: theme.primary };
@@ -2654,6 +3152,7 @@ export function createTUI(): void {
   }
   
   screen.key(['tab'], () => {
+    if (isModalOpen() || isEditingInput(screen)) return;
     if (focusedElement === 'model' && !modelList.hidden) {
       focusedElement = 'menu';
       menuBox.focus();
@@ -2661,6 +3160,23 @@ export function createTUI(): void {
       focusedElement = 'menu';
       menuBox.focus();
     } else if (focusedElement === 'menu') {
+      // 模型/预设列表打开时 info/resource 是隐藏的,跳过隐藏面板
+      if (!infoBox.hidden) {
+        focusedElement = 'info';
+        infoBox.focus();
+      } else {
+        focusedElement = 'serverLog';
+        serverLogBox.focus();
+      }
+    } else if (focusedElement === 'info') {
+      if (!resourceBox.hidden) {
+        focusedElement = 'resource';
+        resourceBox.focus();
+      } else {
+        focusedElement = 'serverLog';
+        serverLogBox.focus();
+      }
+    } else if (focusedElement === 'resource') {
       focusedElement = 'serverLog';
       serverLogBox.focus();
     } else if (focusedElement === 'serverLog') {
@@ -2676,6 +3192,8 @@ export function createTUI(): void {
   modelList.on('focus', () => { focusedElement = 'model'; updateFocusBorder(); });
   presetList.on('focus', () => { focusedElement = 'preset'; updateFocusBorder(); });
   menuBox.on('focus', () => { focusedElement = 'menu'; updateFocusBorder(); });
+  infoBox.on('focus', () => { focusedElement = 'info'; updateFocusBorder(); });
+  resourceBox.on('focus', () => { focusedElement = 'resource'; updateFocusBorder(); });
   serverLogBox.on('focus', () => { focusedElement = 'serverLog'; updateFocusBorder(); });
   requestLogBox.on('focus', () => { focusedElement = 'requestLog'; updateFocusBorder(); });
 
@@ -2685,47 +3203,47 @@ export function createTUI(): void {
     stopLogWatcher();
     stopResourceWatcher();
     stopProxy();
+    // 恢复终端:退出 alternate screen / mouse 模式,避免 shell 残留乱码状态
+    screen.destroy();
   }
 
   async function init(): Promise<void> {
+    // 启动时预热 GPU 数量缓存(Tensor Split 选项等热路径只读缓存)
+    await warmSystemInfoCache();
+
     loadModels();
     loadPresetsList();
     
     // 检查是否有残留进程
     const status = getServerStatus();
     
-    // 检查端口占用情况
-    let portsInUse = false;
-    try {
-      const output = execSync('lsof -i :8080 -i :8081 -t 2>/dev/null || true', { encoding: 'utf-8' });
-      portsInUse = output.trim().length > 0;
-    } catch {}
-    
     // 如果有 PID 文件记录的服务器在运行
     if (status.running && status.port) {
       currentInternalPort = status.port;
-      currentPublicPort = status.port - 1;
       
-      if (status.port % 10 === 0) {
-        currentPublicPort = status.port;
-        currentInternalPort = status.port + 1;
-        showMessage(`Note: Server running on port ${status.port} without proxy.`, 'info');
-        showMessage(`Restart via TUI to enable request logging.`, 'info');
-      } else {
+      if (status.proxy && status.publicPort) {
+        // PID 文件记录经代理启动:按记录的对外端口补代理
+        currentPublicPort = status.publicPort;
         try {
           await startProxy(currentPublicPort, currentInternalPort);
           showMessage(`Proxy reconnected on port ${currentPublicPort}`, 'success');
         } catch {
+          // 清空 proxyServer 引用(失败时变量非空但未监听),避免状态栏误显示代理在跑
+          stopProxy();
           showMessage(`Could not start proxy on port ${currentPublicPort}`, 'error');
         }
+      } else {
+        // 无代理启动(旧格式 PID 文件无 proxy 字段同此处理):不再按端口号猜测
+        currentPublicPort = status.port;
+        showMessage(`Note: Server running on port ${status.port} without proxy.`, 'info');
+        showMessage(`Restart via TUI to enable request logging.`, 'info');
       }
       
       startLogWatcher();
       startResourceWatcher();
-    } else if (portsInUse && !status.running) {
-      // 端口被占用但没有 PID 文件 - 可能是残留进程
-      showMessage('Detected orphan processes on ports 8080/8081', 'info');
-      cleanupOrphanProcesses();
+    } else if (!status.running) {
+      // 无 PID 记录但配置端口可能被残留 llama-server 占用:检查并清理
+      await cleanupOrphanProcesses();
     }
 
     updateStatus();
@@ -2735,22 +3253,10 @@ export function createTUI(): void {
     screen.render();
   }
 
-  init();
-}
-
-function formatUptime(ms: number): string {
-  const seconds = Math.floor(ms / 1000);
-  const minutes = Math.floor(seconds / 60);
-  const hours = Math.floor(minutes / 60);
-  const days = Math.floor(hours / 24);
-
-  if (days > 0) {
-    return `${days}d ${hours % 24}h ${minutes % 60}m`;
-  } else if (hours > 0) {
-    return `${hours}h ${minutes % 60}m ${seconds % 60}s`;
-  } else if (minutes > 0) {
-    return `${minutes}m ${seconds % 60}s`;
-  } else {
-    return `${seconds}s`;
-  }
+  // 初始化失败(如模型目录权限不足):先恢复终端再报错退出,避免未处理拒绝崩溃
+  init().catch(err => {
+    try { screen.destroy(); } catch {}
+    console.error(err);
+    process.exit(1);
+  });
 }

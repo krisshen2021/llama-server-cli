@@ -1,10 +1,17 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync } from 'fs';
 import { homedir } from 'os';
-import { dirname, join } from 'path';
+import { join } from 'path';
 import { Config, DEFAULT_CONFIG } from '../types.js';
+import { readJsonSafe, writeJsonAtomic } from './json-file.js';
 
-const CONFIG_DIR = join(homedir(), '.config', 'lsc');
-const CONFIG_FILE = join(CONFIG_DIR, 'config.json');
+// 配置目录:可用 LSC_CONFIG_DIR 覆盖(便于测试)
+export function getConfigDir(): string {
+  return process.env.LSC_CONFIG_DIR ?? join(homedir(), '.config', 'lsc');
+}
+
+export function getConfigPath(): string {
+  return join(getConfigDir(), 'config.json');
+}
 
 // 展开路径中的 ~
 export function expandPath(p: string): string {
@@ -16,35 +23,32 @@ export function expandPath(p: string): string {
 
 // 确保配置目录存在
 function ensureConfigDir(): void {
-  if (!existsSync(CONFIG_DIR)) {
-    mkdirSync(CONFIG_DIR, { recursive: true });
+  const dir = getConfigDir();
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
   }
 }
 
 // 加载配置
 export function loadConfig(): Config {
   ensureConfigDir();
-  
-  if (!existsSync(CONFIG_FILE)) {
+
+  if (!existsSync(getConfigPath())) {
     // 首次运行，创建默认配置
     saveConfig(DEFAULT_CONFIG);
     return DEFAULT_CONFIG;
   }
-  
-  try {
-    const content = readFileSync(CONFIG_FILE, 'utf-8');
-    const config = JSON.parse(content) as Partial<Config>;
-    // 合并默认配置，确保所有字段都存在
-    return { ...DEFAULT_CONFIG, ...config };
-  } catch {
-    return DEFAULT_CONFIG;
-  }
+
+  // 解析失败时 readJsonSafe 会备份 .bak 并返回 {},避免静默丢数据
+  const config = readJsonSafe<Partial<Config>>(getConfigPath(), {});
+  // 合并默认配置，确保所有字段都存在
+  return { ...DEFAULT_CONFIG, ...config };
 }
 
-// 保存配置
+// 保存配置(原子写)
 export function saveConfig(config: Config): void {
   ensureConfigDir();
-  writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
+  writeJsonAtomic(getConfigPath(), config);
 }
 
 // 获取单个配置项
@@ -69,5 +73,3 @@ export function getExpandedConfig(): Config {
     llamaServerPath: expandPath(config.llamaServerPath),
   };
 }
-
-export { CONFIG_DIR, CONFIG_FILE };

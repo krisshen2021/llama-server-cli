@@ -106,20 +106,3 @@ export async function verifyFiles(
   
   return results;
 }
-
-/**
- * 格式化验证进度用于显示
- */
-export function formatVerifyProgress(progress: VerifyProgress): string {
-  const bar = createProgressBar(progress.percent, 20);
-  return `Verifying ${progress.filename}... [${bar}] ${progress.percent}%`;
-}
-
-/**
- * 创建进度条字符串
- */
-function createProgressBar(percent: number, width: number): string {
-  const filled = Math.round((percent / 100) * width);
-  const empty = width - filled;
-  return '█'.repeat(filled) + '░'.repeat(empty);
-}

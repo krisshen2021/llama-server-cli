@@ -1,5 +1,6 @@
-import { existsSync, readFileSync, writeFileSync, unlinkSync, readdirSync, statSync, rmdirSync } from 'fs';
+import { existsSync, unlinkSync, readdirSync, statSync, rmdirSync } from 'fs';
 import { basename, dirname, join } from 'path';
+import { readJsonSafe, writeJsonAtomic } from './json-file.js';
 
 export interface DownloadMeta {
   url: string;
@@ -25,17 +26,12 @@ export function getMetaPathForFile(destPath: string): string {
 }
 
 export function writeDownloadMeta(metaPath: string, meta: DownloadMeta): void {
-  writeFileSync(metaPath, JSON.stringify(meta, null, 2));
+  writeJsonAtomic(metaPath, meta);
 }
 
 export function readDownloadMeta(metaPath: string): DownloadMeta | null {
-  if (!existsSync(metaPath)) return null;
-  try {
-    const content = readFileSync(metaPath, 'utf-8');
-    return JSON.parse(content) as DownloadMeta;
-  } catch {
-    return null;
-  }
+  // 损坏时 readJsonSafe 备份 .bak 并返回 null
+  return readJsonSafe<DownloadMeta | null>(metaPath, null);
 }
 
 export function deleteDownloadMeta(metaPath: string): void {

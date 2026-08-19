@@ -1,7 +1,10 @@
 import { Command } from 'commander';
 import chalk from 'chalk';
-import { Config } from '../types.js';
+import { Config, DEFAULT_CONFIG } from '../types.js';
 import { loadConfig, setConfigValue, getConfigValue } from '../utils/config-manager.js';
+
+// 合法配置键:DEFAULT_CONFIG 的全部键 + 可选的 hfToken(单点来源)
+const VALID_KEYS = [...Object.keys(DEFAULT_CONFIG), 'hfToken'] as const;
 
 export function createConfigCommand(): Command {
   const cmd = new Command('config');
@@ -31,11 +34,9 @@ export function createConfigCommand(): Command {
     .command('get <key>')
     .description('Get a configuration value')
     .action((key: string) => {
-      const validKeys = ['modelsDir', 'llamaServerPath', 'defaultPort', 'defaultCtxSize', 'defaultGpuLayers', 'defaultHost', 'defaultBatchSize', 'defaultThreadsBatch', 'defaultCachePrompt', 'defaultCacheReuse'];
-      
-      if (!validKeys.includes(key)) {
+      if (!(VALID_KEYS as readonly string[]).includes(key)) {
         console.error(chalk.red(`Invalid key: ${key}`));
-        console.log(chalk.gray(`Valid keys: ${validKeys.join(', ')}`));
+        console.log(chalk.gray(`Valid keys: ${VALID_KEYS.join(', ')}`));
         process.exit(1);
       }
       
@@ -48,11 +49,9 @@ export function createConfigCommand(): Command {
     .command('set <key> <value>')
     .description('Set a configuration value')
     .action((key: string, value: string) => {
-      const validKeys = ['modelsDir', 'llamaServerPath', 'defaultPort', 'defaultCtxSize', 'defaultGpuLayers', 'defaultHost', 'defaultBatchSize', 'defaultThreadsBatch', 'defaultCachePrompt', 'defaultCacheReuse'];
-      
-      if (!validKeys.includes(key)) {
+      if (!(VALID_KEYS as readonly string[]).includes(key)) {
         console.error(chalk.red(`Invalid key: ${key}`));
-        console.log(chalk.gray(`Valid keys: ${validKeys.join(', ')}`));
+        console.log(chalk.gray(`Valid keys: ${VALID_KEYS.join(', ')}`));
         process.exit(1);
       }
       
@@ -80,6 +79,11 @@ export function createConfigCommand(): Command {
           process.exit(1);
         }
         parsedValue = normalized === 'true';
+      } else if (key === 'downloadBackend') {
+        if (value !== 'auto' && value !== 'aria2' && value !== 'builtin') {
+          console.error(chalk.red(`Invalid value for ${key}: must be auto, aria2 or builtin`));
+          process.exit(1);
+        }
       }
       
       setConfigValue(key as keyof Config, parsedValue as never);

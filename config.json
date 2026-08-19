@@ -1,8 +1,0 @@
-{
-  "modelsDir": "~/.cache/lm-studio/models/lmstudio-community/",
-  "llamaServerPath": "~/llama.cpp/build/bin/llama-server",
-  "defaultPort": 8080,
-  "defaultCtxSize": 32768,
-  "defaultGpuLayers": "auto",
-  "defaultHost": "0.0.0.0"
-}

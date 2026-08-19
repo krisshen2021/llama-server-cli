@@ -58,6 +58,19 @@ function isMtpFile(filename: string): boolean {
   return /^mtp-/i.test(filename);
 }
 
+// 判断是否是投机解码草稿模型文件(MTP 模块,或 DFlash/DSpark/EAGLE 等独立 drafter)
+function isDraftModelFile(filename: string): boolean {
+  return isMtpFile(filename) || /dflash|dspark|draft|eagle/i.test(filename);
+}
+
+// 扫描 modelsDir 下所有草稿模型文件,供预设编辑器的 specModel 选项循环切换
+export function findDraftModelFiles(modelsDir: string): string[] {
+  if (!existsSync(modelsDir)) return [];
+  return findGgufFiles(modelsDir)
+    .filter(p => isDraftModelFile(basename(p)))
+    .sort();
+}
+
 // 从模型基础名中剥掉量化标记(如 q4_k_m)与分片后缀(如 -00001-of-00003),并清理残留分隔符(. - _)
 // 全连字符写法(如 Q4-K-M)上游 hf-api 已能检测(其 replaceAll 会替换全部下划线),
 // detectQuantization 统一返回下划线形式,这里按 [-_] 同时匹配两种分隔符;

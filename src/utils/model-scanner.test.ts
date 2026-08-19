@@ -2,11 +2,12 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, readdirSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import type { scanModels as scanModelsFn, resolveSpecModel as resolveSpecModelFn } from './model-scanner.js';
+import type { scanModels as scanModelsFn, resolveSpecModel as resolveSpecModelFn, findDraftModelFiles as findDraftModelFilesFn } from './model-scanner.js';
 
 let dir: string;
 let scanModels: typeof scanModelsFn;
 let resolveSpecModel: typeof resolveSpecModelFn;
+let findDraftModelFiles: typeof findDraftModelFilesFn;
 
 // scanner 只按文件名/大小工作,dummy 文件即可;但 scanModels 会经 getExpandedConfig
 // 触碰配置目录,须用 LSC_CONFIG_DIR 隔离
@@ -14,7 +15,7 @@ beforeEach(async () => {
   dir = mkdtempSync(join(tmpdir(), 'lsc-scan-'));
   vi.stubEnv('LSC_CONFIG_DIR', dir);
   vi.resetModules();
-  ({ scanModels, resolveSpecModel } = await import('./model-scanner.js'));
+  ({ scanModels, resolveSpecModel, findDraftModelFiles } = await import('./model-scanner.js'));
 });
 
 afterEach(() => {
@@ -223,5 +224,30 @@ describe('resolveSpecModel 投机解码模块解析', () => {
   it('zh 语言:返回中文警告', () => {
     const r = resolveSpecModel('draft-eagle3', undefined, undefined, 'zh');
     expect(r.warning).toContain('需要 draft/MTP 模块');
+  });
+});
+
+describe('findDraftModelFiles 草稿模型扫描', () => {
+  it('匹配 mtp-*/DFlash/DSpark/EAGLE/draft 命名,普通模型与 mmproj 不入列', () => {
+    touch('Qwen3.8-27B-Q6_K_L.gguf');
+    touch('mmproj-Qwen3.8-27B-f16.gguf');
+    touch('mtp-Qwen3.8-27B.gguf');
+    touch('Qwen3.8-27B-DFlash2-Q8_0.gguf');
+    touch('Foo-DSpark-Q4_K_M.gguf');
+    touch('Bar-eagle3-Q4_K_M.gguf');
+    touch('Baz-draft-Q4_K_M.gguf');
+
+    const files = findDraftModelFiles(dir).map(p => p.split('/').pop());
+    expect(files).toEqual([
+      'Bar-eagle3-Q4_K_M.gguf',
+      'Baz-draft-Q4_K_M.gguf',
+      'Foo-DSpark-Q4_K_M.gguf',
+      'Qwen3.8-27B-DFlash2-Q8_0.gguf',
+      'mtp-Qwen3.8-27B.gguf',
+    ]);
+  });
+
+  it('目录不存在:返回空数组', () => {
+    expect(findDraftModelFiles(join(dir, 'nope'))).toEqual([]);
   });
 });

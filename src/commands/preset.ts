@@ -300,6 +300,14 @@ async function runPresetSave(name: string): Promise<void> {
       ],
       default: existing?.specType ?? '',
     },
+    {
+      type: 'input',
+      name: 'specModel',
+      message: 'Speculative draft model path (blank = auto-pair):',
+      default: existing?.specModel ?? '',
+      // 仅 draft-* 系需要草稿模块(draft-mtp 时作为内置 MTP 的覆盖通道)
+      when: (a) => typeof a.specType === 'string' && a.specType.startsWith('draft-'),
+    },
   ]);
   
   const preset: Preset = {
@@ -320,9 +328,9 @@ async function runPresetSave(name: string): Promise<void> {
     flashAttn: answers.flashAttn,
     reasoningBudget: answers.reasoningBudget,
     specType: answers.specType || undefined, // '' (Off) 不写入预设,与 TUI 编辑器一致
-    // 交互流程没有 specModel 问题,但已手工配置的值(非 mtp- 命名 draft 模块的覆盖通道)
-    // 必须原样保留,不能因逐字段重建而丢失(同 TUI 编辑器)
-    specModel: existing?.specModel,
+    // specModel 仅在 draft-* 系下保留(此时字段已显示,answers.specModel 必有值);
+    // 其他类型保留会让 llama.cpp 把用不到的 draft 白加载进 VRAM
+    specModel: answers.specType.startsWith('draft-') ? (answers.specModel || undefined) : undefined,
     // slotSavePath 同理:交互流程不提供该字段,已配置的值(TUI 开关或手工设置)原样保留
     slotSavePath: existing?.slotSavePath,
   };

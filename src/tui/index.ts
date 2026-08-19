@@ -39,7 +39,7 @@ import { execSync, execFile } from 'child_process';
 import { promisify } from 'util';
 import { ModelInfo, Preset, ServerOptions } from '../types.js';
 import { getGpuInfo, getRamInfo, warmSystemInfoCache, getCachedGpuCount, getLanIPv4 } from './system-info.js';
-import { scanModels, findModel, resolveSpecModel } from '../utils/model-scanner.js';
+import { scanModels, findModel, resolveSpecModel, findDraftModelFiles } from '../utils/model-scanner.js';
 import { getServerStatus, startServer, stopServer, readLastLogs, getLogFile, isLlamaServerProcess, checkLlamaServerVersion, ctxAutoFitConflict, getDefaultSlotSavePath, MIN_LLAMA_SERVER_BUILD } from '../utils/process-manager.js';
 import { loadPresets, getPreset, savePreset, deletePreset, presetExists, renamePreset } from '../utils/preset-manager.js';
 import { getExpandedConfig, getConfigDir } from '../utils/config-manager.js';
@@ -1499,6 +1499,7 @@ export function createTUI(): void {
       jinja: preset.jinja,
       flashAttn: preset.flashAttn,
       specType: preset.specType || '',
+      specModel: preset.specModel || '',
       slotSave: !!preset.slotSavePath,
     };
 
@@ -1517,8 +1518,10 @@ export function createTUI(): void {
       }
     }
     const templateOptions = getChatTemplateOptions(modelDir, join(getConfigDir(), 'templates'));
+    // 草稿模型选项:扫描 modelsDir 里的 mtp-*/DFlash/DSpark 等文件,'' 表示 Auto(启动时自动配对)
+    const specModelOptions = ['', ...findDraftModelFiles(config.modelsDir)];
 
-    // 创建编辑对话框(高度自适应终端,超出可滚动:18 个字段 + Model 行 + 帮助行在 height:21 下会截断尾部字段)
+    // 创建编辑对话框(高度自适应终端,超出可滚动:19 个字段 + Model 行 + 帮助行在 height:21 下会截断尾部字段)
     const editor = blessed.box({
       parent: screen,
       top: 'center',
@@ -1543,8 +1546,8 @@ export function createTUI(): void {
 
     // 当前选中的字段
     let selectedField = 0;
-    const fields = ['ctxSize', 'gpuLayers', 'tensorSplit', 'useVision', 'fit', 'batchSize', 'threadsBatch', 'cachePrompt', 'cacheReuse', 'kvCacheType', 'chatTemplate', 'port', 'host', 'reasoningBudget', 'jinja', 'flashAttn', 'specType', 'slotSave'];
-    const fieldLabels = ['Context Size', 'GPU Layers', 'Tensor Split', 'Vision', 'Fit', 'Batch Size', 'Threads Batch', 'Cache Prompt', 'Cache Reuse', 'KV Cache', 'Chat Template', 'Port', 'Host', 'Thinking', 'Jinja', 'Flash Attention', 'Spec Type', 'Slot Save'];
+    const fields = ['ctxSize', 'gpuLayers', 'tensorSplit', 'useVision', 'fit', 'batchSize', 'threadsBatch', 'cachePrompt', 'cacheReuse', 'kvCacheType', 'chatTemplate', 'port', 'host', 'reasoningBudget', 'jinja', 'flashAttn', 'specType', 'specModel', 'slotSave'];
+    const fieldLabels = ['Context Size', 'GPU Layers', 'Tensor Split', 'Vision', 'Fit', 'Batch Size', 'Threads Batch', 'Cache Prompt', 'Cache Reuse', 'KV Cache', 'Chat Template', 'Port', 'Host', 'Thinking', 'Jinja', 'Flash Attention', 'Spec Type', 'Spec Model', 'Slot Save'];
 
     function renderEditor() {
       let content = `{${theme.muted}-fg}Model:{/} ${editState.model}\n\n`;
@@ -1606,6 +1609,10 @@ export function createTUI(): void {
             break;
           case 'specType':
             value = editState.specType ? editState.specType : '{yellow-fg}Off{/}';
+            break;
+          case 'specModel':
+            // 路径太长塞不进 60 宽对话框,只显示文件名(选项均来自 modelsDir 扫描)
+            value = editState.specModel ? basename(editState.specModel) : '{yellow-fg}Auto{/}';
             break;
           case 'slotSave':
             value = editState.slotSave ? '{green-fg}On{/}' : '{yellow-fg}Off{/}';
@@ -1721,6 +1728,11 @@ export function createTUI(): void {
           const specIdx = specTypes.indexOf(editState.specType);
           editState.specType = specTypes[(specIdx + 1) % specTypes.length];
           break;
+        case 'specModel':
+          // 循环切换扫描到的草稿模型;'' = Auto(启动时按目录自动配对 mtp-* 模块)
+          const specModelIdx = specModelOptions.indexOf(editState.specModel);
+          editState.specModel = specModelOptions[(specModelIdx + 1) % specModelOptions.length];
+          break;
         case 'slotSave':
           editState.slotSave = !editState.slotSave;
           break;
@@ -1767,9 +1779,9 @@ export function createTUI(): void {
           flashAttn: editState.flashAttn,
           reasoningBudget: editState.reasoningBudget,
           specType: editState.specType || undefined, // '' 表示关闭,不写入预设
-          // 编辑器不提供 specModel 字段,但预设里手工配置的(非 mtp- 命名 draft 模块的
-          // 覆盖通道)必须原样保留,不能因逐字段重建而丢失
-          specModel: preset.specModel || undefined,
+          // specModel 仅在 draft-* 系下有意义(draft-mtp 时为内置 MTP 的覆盖通道);
+          // 其他类型保留会让 llama.cpp 把用不到的 draft 白加载进 VRAM
+          specModel: editState.specType.startsWith('draft-') ? (editState.specModel || undefined) : undefined,
           // On 时优先保留已有的自定义路径(编辑器不管理具体目录,与 specModel 同理);
           // 没有时才写默认目录;Off 时为 undefined,JSON.stringify 会丢弃该键(即禁用)
           slotSavePath: editState.slotSave ? (preset.slotSavePath || getDefaultSlotSavePath()) : undefined,

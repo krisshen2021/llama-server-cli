@@ -1530,6 +1530,7 @@ export function createTUI(): void {
       specType: preset.specType || '',
       specModel: preset.specModel || '',
       specDraftMax: preset.specDraftMax ?? 0,
+      parallelSlots: preset.parallelSlots ?? 0,
       slotSave: !!preset.slotSavePath,
     };
 
@@ -1576,8 +1577,8 @@ export function createTUI(): void {
 
     // 当前选中的字段
     let selectedField = 0;
-    const fields = ['ctxSize', 'gpuLayers', 'tensorSplit', 'useVision', 'fit', 'batchSize', 'threadsBatch', 'cachePrompt', 'cacheReuse', 'kvCacheType', 'chatTemplate', 'port', 'host', 'reasoningBudget', 'jinja', 'flashAttn', 'specType', 'specModel', 'specDraftMax', 'slotSave'];
-    const fieldLabels = ['Context Size', 'GPU Layers', 'Tensor Split', 'Vision', 'Fit', 'Batch Size', 'Threads Batch', 'Cache Prompt', 'Cache Reuse', 'KV Cache', 'Chat Template', 'Port', 'Host', 'Thinking', 'Jinja', 'Flash Attention', 'Spec Type', 'Spec Model', 'Spec Draft N', 'Slot Save'];
+    const fields = ['ctxSize', 'gpuLayers', 'tensorSplit', 'useVision', 'fit', 'batchSize', 'threadsBatch', 'cachePrompt', 'cacheReuse', 'kvCacheType', 'chatTemplate', 'port', 'host', 'reasoningBudget', 'jinja', 'flashAttn', 'specType', 'specModel', 'specDraftMax', 'parallelSlots', 'slotSave'];
+    const fieldLabels = ['Context Size', 'GPU Layers', 'Tensor Split', 'Vision', 'Fit', 'Batch Size', 'Threads Batch', 'Cache Prompt', 'Cache Reuse', 'KV Cache', 'Chat Template', 'Port', 'Host', 'Thinking', 'Jinja', 'Flash Attention', 'Spec Type', 'Spec Model', 'Spec Draft N', 'Parallel Slots', 'Slot Save'];
 
     function renderEditor() {
       let content = `{${theme.muted}-fg}Model:{/} ${editState.model}\n\n`;
@@ -1646,6 +1647,9 @@ export function createTUI(): void {
             break;
           case 'specDraftMax':
             value = editState.specDraftMax ? String(editState.specDraftMax) : '{yellow-fg}Default{/}';
+            break;
+          case 'parallelSlots':
+            value = editState.parallelSlots ? String(editState.parallelSlots) : '{yellow-fg}Auto{/}';
             break;
           case 'slotSave':
             value = editState.slotSave ? '{green-fg}On{/}' : '{yellow-fg}Off{/}';
@@ -1772,6 +1776,12 @@ export function createTUI(): void {
           const draftMaxIdx = draftMaxSteps.indexOf(editState.specDraftMax);
           editState.specDraftMax = draftMaxSteps[(draftMaxIdx + 1) % draftMaxSteps.length];
           break;
+        case 'parallelSlots':
+          // 0 = Auto(llama.cpp 自动,实测为 4);大 ctx 显存吃紧时降到 1-2
+          const slotSteps = [0, 1, 2, 4];
+          const slotIdx = slotSteps.indexOf(editState.parallelSlots);
+          editState.parallelSlots = slotSteps[(slotIdx + 1) % slotSteps.length];
+          break;
         case 'slotSave':
           editState.slotSave = !editState.slotSave;
           break;
@@ -1823,6 +1833,8 @@ export function createTUI(): void {
           specModel: editState.specType.startsWith('draft-') ? (editState.specModel || undefined) : undefined,
           // 草稿 token 数;0 = 不写(用 llama.cpp 默认值),与 specType 解耦,任何 draft 系都可调
           specDraftMax: editState.specDraftMax > 0 ? editState.specDraftMax : undefined,
+          // 并发槽位;0 = 不写(llama.cpp 自动)
+          parallelSlots: editState.parallelSlots > 0 ? editState.parallelSlots : undefined,
           // On 时优先保留已有的自定义路径(编辑器不管理具体目录,与 specModel 同理);
           // 没有时才写默认目录;Off 时为 undefined,JSON.stringify 会丢弃该键(即禁用)
           slotSavePath: editState.slotSave ? (preset.slotSavePath || getDefaultSlotSavePath()) : undefined,

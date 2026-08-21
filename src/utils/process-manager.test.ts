@@ -244,6 +244,27 @@ describe('buildServerArgs metrics', () => {
   });
 });
 
+describe('buildServerArgs parallelSlots', () => {
+  const makeArgsOptions = (): ServerOptions => ({
+    model: '/tmp/model.gguf',
+    ctxSize: 4096,
+    gpuLayers: 0,
+    host: '127.0.0.1',
+    port: 18081,
+    jinja: false,
+    flashAttn: 'auto',
+    reasoningBudget: -1,
+  });
+
+  test('parallelSlots:输出 -np;未设时不输出', () => {
+    const args = buildServerArgs({ ...makeArgsOptions(), parallelSlots: 1 });
+    const idx = args.indexOf('-np');
+    expect(idx).toBeGreaterThanOrEqual(0);
+    expect(args[idx + 1]).toBe('1');
+    expect(buildServerArgs(makeArgsOptions())).not.toContain('-np');
+  });
+});
+
 // ctxSize 'auto' 与 --fit 联动:纯函数,独立于上面的 skipIf 组
 describe('buildServerArgs ctxSize auto 与 fit', () => {
   const makeFitOptions = (): ServerOptions => ({

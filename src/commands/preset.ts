@@ -344,6 +344,8 @@ async function runPresetSave(name: string): Promise<void> {
     specModel: answers.specType.startsWith('draft-') ? (answers.specModel || undefined) : undefined,
     // 草稿 token 数;0 = 不写(用 llama.cpp 默认值)
     specDraftMax: answers.specDraftMax > 0 ? answers.specDraftMax : undefined,
+    // parallelSlots 不在 CLI 交互流程中提供(TUI 编辑器管理),已有值原样保留
+    parallelSlots: existing?.parallelSlots,
     // slotSavePath 同理:交互流程不提供该字段,已配置的值(TUI 开关或手工设置)原样保留
     slotSavePath: existing?.slotSavePath,
   };

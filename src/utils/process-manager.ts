@@ -265,6 +265,11 @@ export function buildServerArgs(options: ServerOptions): string[] {
     args.push('--spec-draft-n-max', String(options.specDraftMax));
   }
 
+  // 并发槽位数:不设则交给 llama.cpp 默认(auto)
+  if (options.parallelSlots) {
+    args.push('-np', String(options.parallelSlots));
+  }
+
   // 自定义 chat template
   if (options.chatTemplate) {
     let templatePath = options.chatTemplate;

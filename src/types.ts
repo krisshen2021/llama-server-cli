@@ -41,6 +41,7 @@ export interface ServerOptions {
   specType?: string;  // 投机解码类型(--spec-type,如 draft-mtp)
   specModel?: string; // draft/MTP 模块路径(--model-draft)
   specDraftMax?: number; // 每次验证的草稿 token 数(--spec-draft-n-max);DFlash2 官方建议 7
+  parallelSlots?: number; // 并发槽位数(-np);不设 = llama.cpp 自动。大 ctx 显存吃紧时降到 1-2
   slotSavePath?: string; // 会话 KV 持久化目录(--slot-save-path);undefined = 禁用
 }
 
@@ -68,6 +69,7 @@ export interface Preset {
   specType?: string;  // 投机解码类型(--spec-type,如 draft-mtp)
   specModel?: string; // draft/MTP 模块路径(--model-draft)
   specDraftMax?: number; // 每次验证的草稿 token 数(--spec-draft-n-max);DFlash2 官方建议 7
+  parallelSlots?: number; // 并发槽位数(-np);不设 = llama.cpp 自动。大 ctx 显存吃紧时降到 1-2
   slotSavePath?: string; // 会话 KV 持久化目录(--slot-save-path);undefined = 禁用
 }
 

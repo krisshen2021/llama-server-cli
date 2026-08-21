@@ -45,6 +45,7 @@ import { loadPresets, getPreset, savePreset, deletePreset, presetExists, renameP
 import { getExpandedConfig, getConfigDir } from '../utils/config-manager.js';
 import { resolveServerOptions } from '../utils/server-options.js';
 import { createRequestLogger } from '../utils/request-logger.js';
+import { fetchDecodeMetrics } from '../utils/metrics.js';
 import { 
   fetchRepoFiles, 
   getAvailableQuantizations, 
@@ -559,6 +560,10 @@ export function createTUI(): void {
   // 周期任务防重入:上一轮采集未结束(如 nvidia-smi 超时≈刷新间隔)则跳过本轮
   let resourcesTickRunning = false;
 
+  // 解码速度的上一轮采样:/metrics 是累计计数器,差分得出最近区间速度;
+  // 服务器重启后计数器归零(secondsTotal 变小),此时丢弃旧样本重新累计
+  let lastDecodeSample: { tokens: number; seconds: number } | null = null;
+
   async function updateResources(): Promise<void> {
     if (resourcesTickRunning) return;
     resourcesTickRunning = true;
@@ -627,6 +632,30 @@ export function createTUI(): void {
         if (currentServerOptions.specType) {
           content += `  {${theme.secondary}-fg}Spec Type:{/} ${currentServerOptions.specType}\n`;
         }
+      }
+
+      // 解码速度(服务器带 --metrics 时才有数据;旧服务未开则整段不显示)
+      if (status.running && status.port) {
+        const dm = await fetchDecodeMetrics(status.port);
+        if (dm) {
+          if (lastDecodeSample && dm.secondsTotal < lastDecodeSample.seconds) {
+            lastDecodeSample = null;
+          }
+          const avg = dm.secondsTotal > 0 ? dm.tokensTotal / dm.secondsTotal : 0;
+          let cur: number | null = null;
+          if (lastDecodeSample && dm.secondsTotal > lastDecodeSample.seconds) {
+            cur = (dm.tokensTotal - lastDecodeSample.tokens) / (dm.secondsTotal - lastDecodeSample.seconds);
+          }
+          lastDecodeSample = { tokens: dm.tokensTotal, seconds: dm.secondsTotal };
+          content += `\n{bold}Decode Speed{/bold}\n\n`;
+          content += `  {${theme.secondary}-fg}Avg:{/} ${avg.toFixed(1)} tok/s`;
+          if (cur !== null) {
+            content += `   {${theme.secondary}-fg}Cur:{/} ${cur.toFixed(1)} tok/s`;
+          }
+          content += '\n';
+        }
+      } else {
+        lastDecodeSample = null;
       }
 
       resourceBox.setContent(content);

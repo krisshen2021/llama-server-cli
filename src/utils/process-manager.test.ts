@@ -228,6 +228,22 @@ describe('buildServerArgs 投机解码参数', () => {
   });
 });
 
+describe('buildServerArgs metrics', () => {
+  test('始终输出 --metrics(TUI 解码速度面板依赖 /metrics 端点)', () => {
+    const args = buildServerArgs({
+      model: '/tmp/model.gguf',
+      ctxSize: 4096,
+      gpuLayers: 0,
+      host: '127.0.0.1',
+      port: 18081,
+      jinja: false,
+      flashAttn: 'auto',
+      reasoningBudget: -1,
+    });
+    expect(args).toContain('--metrics');
+  });
+});
+
 // ctxSize 'auto' 与 --fit 联动:纯函数,独立于上面的 skipIf 组
 describe('buildServerArgs ctxSize auto 与 fit', () => {
   const makeFitOptions = (): ServerOptions => ({

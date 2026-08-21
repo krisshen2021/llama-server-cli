@@ -237,6 +237,9 @@ export function buildServerArgs(options: ServerOptions): string[] {
   // 主机和端口
   args.push('--host', options.host);
   args.push('--port', options.port.toString());
+
+  // Prometheus 指标端点:TUI Resources 面板的解码速度依赖它;开销可忽略,常驻开启
+  args.push('--metrics');
   
   // Jinja 模板
   if (options.jinja) {

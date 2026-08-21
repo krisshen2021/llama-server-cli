@@ -1679,7 +1679,7 @@ export function createTUI(): void {
         switch (field) {
           case 'ctxSize':
             // 'auto' 排在档位末尾:保存为字符串,启动时配合 --fit 自动调整上下文
-            const ctxSteps: (number | 'auto')[] = [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 'auto'];
+            const ctxSteps: (number | 'auto')[] = [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 163840, 196608, 229376, 262144, 'auto'];
             const ctxIdx = ctxSteps.indexOf(editState.ctxSize);
             const newCtxIdx = Math.max(0, Math.min(ctxSteps.length - 1, ctxIdx + delta));
             editState.ctxSize = ctxSteps[newCtxIdx];
